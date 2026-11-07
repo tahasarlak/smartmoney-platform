@@ -1,0 +1,92 @@
+
+name: SmartMoney V11 - Neon Connectivity
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: neon-connectivity-development
+  cancel-in-progress: false
+
+jobs:
+  test-neon:
+    name: Test Neon PostgreSQL
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+
+    environment: development
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install PostgreSQL driver
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install "psycopg[binary]>=3.2,<4"
+
+      - name: Test Neon connections
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          DIRECT_URL: ${{ secrets.DIRECT_URL }}
+        run: |
+          python - <<'PY'
+          import os
+          import sys
+          import psycopg
+
+          connections = [
+              ("Pooled connection", "DATABASE_URL"),
+              ("Direct connection", "DIRECT_URL"),
+          ]
+
+          failed = False
+
+          for label, variable in connections:
+              dsn = os.environ.get(variable)
+
+              print(f"\n===== {label} =====")
+
+              if not dsn:
+                  print("FAILED: GitHub Environment secret is missing.")
+                  failed = True
+                  continue
+
+              try:
+                  with psycopg.connect(
+                      dsn,
+                      connect_timeout=20,
+                      sslmode="require",
+                  ) as conn:
+                      with conn.cursor() as cur:
+                          cur.execute("""
+                              SELECT
+                                  current_database(),
+                                  current_user,
+                                  current_setting('server_version')
+                          """)
+                          database, user, version = cur.fetchone()
+
+                          print("STATUS: CONNECTED")
+                          print("DATABASE:", database)
+                          print("USER:", user)
+                          print("POSTGRESQL:", version)
+
+              except Exception as exc:
+                  print("STATUS: FAILED")
+                  print("ERROR TYPE:", type(exc).__name__)
+                  failed = True
+
+          if failed:
+              sys.exit(1)
+
+          print("\nSUCCESS: Both Neon connections verified.")
+          PY

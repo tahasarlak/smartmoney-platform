@@ -1,0 +1,27 @@
+# === LIVE PRICE MONITOR 7.0: IMPORT ===
+from .live_price_monitor import live_price_monitor
+
+# === LIVE PRICE MONITOR 7.0: STARTUP/SHUTDOWN ===
+# Add these handlers at module level after app = FastAPI(...).
+@app.on_event("startup")
+async def start_live_price_monitor():
+    # Safe when there are no active signals: worker waits and checks again.
+    await live_price_monitor.start()
+
+@app.on_event("shutdown")
+async def stop_live_price_monitor():
+    await live_price_monitor.stop()
+
+# === LIVE PRICE MONITOR 7.0: STATUS ENDPOINT ===
+@app.get("/api/v1/monitor/live-price/status")
+def live_price_monitor_status():
+    return live_price_monitor.status()
+
+# === LIVE PRICE MONITOR 7.0: MANUAL CONTROL ===
+@app.post("/api/v1/monitor/live-price/start")
+async def start_live_price_monitor_manually():
+    return await live_price_monitor.start()
+
+@app.post("/api/v1/monitor/live-price/stop")
+async def stop_live_price_monitor_manually():
+    return await live_price_monitor.stop()

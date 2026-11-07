@@ -1,0 +1,75 @@
+# === SIGNAL JOURNAL 6.0: IMPORTS ===
+from .signal_journal import (
+    init_db as init_signal_db,
+    create_signal,
+    get_signal,
+    list_signals,
+    signal_events,
+    update_signal_price,
+)
+from .signal_schemas import SignalPriceUpdate
+
+# === SIGNAL JOURNAL 6.0: STARTUP ===
+# Add this after app = FastAPI(...), at module level:
+init_signal_db()
+
+# === SIGNAL JOURNAL 6.0: ENDPOINTS ===
+# Add at module level after existing routes.
+
+@app.post("/api/v1/signals/from-market/{symbol}")
+async def create_signal_from_market(symbol: str, payload: OHLCVRequest):
+    symbol = symbol.upper()
+    if symbol != payload.symbol:
+        raise HTTPException(status_code=422, detail="Path symbol and payload symbol must match")
+    try:
+        rows = await asyncio.gather(*[
+            binance_klines(symbol, tf, max(payload.limit, 100))
+            for tf in TIMEFRAMES
+        ])
+        candles_by_tf = dict(zip(TIMEFRAMES, rows))
+        analyses = {
+            tf: analyze_smc(symbol, candles_by_tf[tf], swing_length=3)
+            for tf in TIMEFRAMES
+        }
+        plan = build_trade_setup(
+            symbol, candles_by_tf, analyses,
+            min_rr=_current_settings.min_rr,
+            risk_percent=_current_settings.risk_per_trade_pct,
+            allow_counter_trend=_current_settings.allow_counter_trend,
+        )
+        if plan.get("status") not in ("pending_retest", "zone_active"):
+            return {"saved": False, "plan": plan}
+        saved = create_signal(plan)
+        return {"saved": True, "signal": saved, "plan": plan,
+                "execution_allowed": False}
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc))
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail=f"Signal creation failed: {exc}")
+
+@app.get("/api/v1/signals")
+def get_signals(status: str | None = None, symbol: str | None = None,
+                limit: int = 100):
+    if not 1 <= limit <= 500:
+        raise HTTPException(status_code=422, detail="limit must be 1..500")
+    return {"signals": list_signals(status, symbol, limit),
+            "execution_allowed": False}
+
+@app.get("/api/v1/signals/{signal_id}")
+def get_signal_detail(signal_id: str):
+    signal = get_signal(signal_id)
+    if signal is None:
+        raise HTTPException(status_code=404, detail="Signal not found")
+    return {"signal": signal, "events": signal_events(signal_id),
+            "execution_allowed": False}
+
+@app.post("/api/v1/signals/{signal_id}/price")
+def update_signal_market_price(signal_id: str, payload: SignalPriceUpdate):
+    try:
+        result = update_signal_price(signal_id, payload.price, payload.timestamp)
+        if result is None:
+            raise HTTPException(status_code=404, detail="Signal not found")
+        return {"signal": result, "execution_allowed": False,
+                "note": "Manual price update only. No continuous market feed is attached."}
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc))

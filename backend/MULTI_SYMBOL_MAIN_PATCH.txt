@@ -1,0 +1,22 @@
+# MULTI-SYMBOL SCANNER 5.0 INTEGRATION
+# Add these imports near the other app imports:
+from .multi_symbol import MultiSymbolScanRequest, scan_many_symbols
+
+# Add this endpoint at module level (same indentation as other @app.post routes):
+@app.post("/api/v1/scanner/binance/multi-symbol")
+async def scan_binance_multi_symbol(payload: MultiSymbolScanRequest):
+    try:
+        return await scan_many_symbols(
+            symbols=payload.symbols,
+            limit=payload.limit,
+            fetch_klines=binance_klines,
+            analyze_smc_fn=analyze_smc,
+            settings={
+                "min_quality_score": _current_settings.min_quality_score,
+                "min_rr": _current_settings.min_rr,
+                "allow_counter_trend": _current_settings.allow_counter_trend,
+            },
+            max_concurrency=payload.max_concurrency,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc))

@@ -1,0 +1,29 @@
+# Add these imports near the top of backend/app/main.py:
+from .trade_setup import build_trade_setup
+
+# Add this endpoint after the existing /api/v1/analysis/multi-timeframe endpoint:
+@app.post("/api/v1/analysis/trade-setup")
+async def trade_setup_analysis(payload: OHLCVRequest):
+    try:
+        rows = await asyncio.gather(*[
+            binance_klines(payload.symbol, tf, max(payload.limit, 100))
+            for tf in TIMEFRAMES
+        ])
+        candles_by_tf = dict(zip(TIMEFRAMES, rows))
+        analyses = {
+            tf: analyze_smc(payload.symbol, candles_by_tf[tf], swing_length=3)
+            for tf in TIMEFRAMES
+        }
+        result = build_trade_setup(
+            payload.symbol,
+            candles_by_tf,
+            analyses,
+            min_rr=_current_settings.min_rr,
+            risk_percent=_current_settings.risk_percent,
+            allow_counter_trend=_current_settings.allow_counter_trend,
+        )
+        return {"provider": "Binance public market data", **result}
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc))
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail=f"Trade setup analysis failed: {exc}")

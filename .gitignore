@@ -1,0 +1,47 @@
+.env
+.venv/
+node_modules/
+.next/
+__pycache__/
+.pytest_cache/
+*.py[cod]
+
+# Environment and secrets
+.env
+.env.*
+!.env.example
+frontend/.env*
+!frontend/.env.local.example
+
+# Python
+.venv/
+**/.venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+
+# Node / Next.js
+node_modules/
+.next/
+out/
+
+# Local databases and runtime data
+backend/data/
+*.sqlite
+*.sqlite3
+*.db
+
+# Backups
+**/*.backup*
+**/backup-*/
+*.bak
+
+# Local review copies and diagnostic scripts
+sm_review/
+inspect_databases.py
+check_db_config.py
+test_neon_connection.py
+
+# Logs
+*.log
+
