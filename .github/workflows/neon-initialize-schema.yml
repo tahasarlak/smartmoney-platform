@@ -1,3 +1,4 @@
+
 name: SmartMoney V11 - Initialize Neon Schema
 
 on:
@@ -17,87 +18,160 @@ concurrency:
 
 jobs:
   migrate:
-    if: ${{ inputs.confirm == 'INITIALIZE_DEVELOPMENT' }}
     runs-on: ubuntu-latest
     timeout-minutes: 10
     environment: development
+
     defaults:
       run:
         working-directory: backend
 
     steps:
-      - uses: actions/checkout@v4
+      - name: Validate confirmation
+        env:
+          CONFIRM: ${{ inputs.confirm }}
+        run: |
+          if [ "$CONFIRM" != "INITIALIZE_DEVELOPMENT" ]; then
+            echo "Invalid confirmation."
+            exit 1
+          fi
 
-      - uses: actions/setup-python@v5
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
         with:
           python-version: "3.12"
 
-      - name: Install backend and database dependencies
+      - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
           python -m pip install -r requirements.txt
           python -m pip install -r requirements-postgres.txt
 
-      - name: Validate Neon target and current schema
+      - name: Validate Neon target
         env:
           DIRECT_URL: ${{ secrets.DIRECT_URL }}
         run: |
           python - <<'PY'
-          import os, sys
+          import os
+          import sys
           import psycopg
-          from psycopg.conninfo import conninfo_to_dict
+
           dsn = os.environ.get("DIRECT_URL", "")
+
           if not dsn:
               sys.exit("DIRECT_URL secret is missing")
-          info = conninfo_to_dict(dsn)
-          print("Target host:", info.get("host", "unknown"))
-          print("Target database:", info.get("dbname", "unknown"))
-          with psycopg.connect(dsn, connect_timeout=20, sslmode="require") as conn:
+
+          if dsn.startswith("postgresql+psycopg://"):
+              dsn = dsn.replace(
+                  "postgresql+psycopg://",
+                  "postgresql://",
+                  1
+              )
+
+          with psycopg.connect(
+              dsn,
+              connect_timeout=20,
+              sslmode="require"
+          ) as conn:
               with conn.cursor() as cur:
-                  cur.execute("SELECT current_database(), current_schema()")
-                  db, schema = cur.fetchone()
-                  print("Connected database:", db, "schema:", schema)
                   cur.execute("""
-                    SELECT count(*) FROM information_schema.tables
-                    WHERE table_schema='public' AND table_type='BASE TABLE'
-                      AND table_name NOT IN ('alembic_version')
+                      SELECT current_database(), current_schema()
                   """)
+                  db, schema = cur.fetchone()
+
+                  print("Database:", db)
+                  print("Schema:", schema)
+
+                  if schema != "public":
+                      sys.exit("Unexpected database schema")
+
+                  cur.execute("""
+                      SELECT COUNT(*)
+                      FROM information_schema.tables
+                      WHERE table_schema = 'public'
+                      AND table_type = 'BASE TABLE'
+                      AND table_name != 'alembic_version'
+                  """)
+
                   count = cur.fetchone()[0]
+
                   if count:
-                      sys.exit(f"Refusing to initialize: {count} application table(s) already exist.")
-                  print("Preflight passed: public schema has no application tables.")
+                      sys.exit(
+                          f"Refusing initialization: "
+                          f"{count} application tables already exist."
+                      )
+
+                  print("Preflight passed.")
+
           PY
 
       - name: Apply Alembic migrations
         env:
           DIRECT_URL: ${{ secrets.DIRECT_URL }}
-        run: alembic upgrade head
+        run: |
+          alembic upgrade head
 
-      - name: Verify schema
+      - name: Verify database schema
         env:
           DIRECT_URL: ${{ secrets.DIRECT_URL }}
         run: |
           python - <<'PY'
-          import os, psycopg
-          with psycopg.connect(os.environ["DIRECT_URL"], connect_timeout=20, sslmode="require") as conn:
+          import os
+          import sys
+          import psycopg
+
+          dsn = os.environ["DIRECT_URL"]
+
+          if dsn.startswith("postgresql+psycopg://"):
+              dsn = dsn.replace(
+                  "postgresql+psycopg://",
+                  "postgresql://",
+                  1
+              )
+
+          required = {
+              "v11_users",
+              "v11_sessions",
+              "v11_portfolios",
+              "v11_broker_accounts",
+              "v11_paper_orders",
+              "v11_audit_events",
+              "v11_backtest_runs",
+              "market_prices",
+              "market_watchlist",
+              "signals",
+              "signal_events",
+              "alembic_version",
+          }
+
+          with psycopg.connect(
+              dsn,
+              connect_timeout=20,
+              sslmode="require"
+          ) as conn:
               with conn.cursor() as cur:
                   cur.execute("""
-                    SELECT table_name FROM information_schema.tables
-                    WHERE table_schema='public' AND table_type='BASE TABLE'
-                    ORDER BY table_name
+                      SELECT table_name
+                      FROM information_schema.tables
+                      WHERE table_schema = 'public'
+                      AND table_type = 'BASE TABLE'
+                      ORDER BY table_name
                   """)
-                  names = [r[0] for r in cur.fetchall()]
-                  for name in names:
-                      print(name)
-                  required = {
-                    "v11_users", "v11_sessions", "v11_portfolios",
-                    "v11_broker_accounts", "v11_paper_orders",
-                    "v11_audit_events", "v11_backtest_runs",
-                    "market_prices", "market_watchlist", "signals",
-                    "signal_events", "alembic_version"
-                  }
-                  missing = required - set(names)
-                  if missing:
-                      raise SystemExit("Missing tables: " + ", ".join(sorted(missing)))
-                  print("SUCCESS: Initial SmartMoney V11 schema verified.")
+
+                  names = {row[0] for row in cur.fetchall()}
+
+          for name in sorted(names):
+              print(name)
+
+          missing = required - names
+
+          if missing:
+              sys.exit(
+                  "Missing tables: " + ", ".join(sorted(missing))
+              )
+
+          print("SUCCESS: SmartMoney V11 schema verified.")
           PY
