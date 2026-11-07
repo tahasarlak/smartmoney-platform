@@ -1,0 +1,119 @@
+
+name: SmartMoney V11 - Neon Schema Audit
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: neon-schema-audit-development
+  cancel-in-progress: false
+
+jobs:
+  audit:
+    name: Read-only database and backend audit
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    environment: development
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install driver
+        run: python -m pip install "psycopg[binary]>=3.2,<4"
+
+      - name: Audit Neon schema
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+        run: |
+          python - <<'PY'
+          import os
+          import sys
+          import psycopg
+
+          dsn = os.environ.get("DATABASE_URL")
+
+          if not dsn:
+              sys.exit("DATABASE_URL secret missing")
+
+          try:
+              with psycopg.connect(
+                  dsn,
+                  connect_timeout=20,
+                  sslmode="require"
+              ) as conn:
+
+                  with conn.cursor() as cur:
+                      cur.execute("""
+                          SELECT current_database(),
+                                 current_schema(),
+                                 current_setting('server_version')
+                      """)
+
+                      db, schema, version = cur.fetchone()
+
+                      print("DATABASE:", db)
+                      print("SCHEMA:", schema)
+                      print("POSTGRESQL:", version)
+
+                      cur.execute("""
+                          SELECT table_schema, table_name
+                          FROM information_schema.tables
+                          WHERE table_type = 'BASE TABLE'
+                            AND table_schema NOT IN
+                                ('pg_catalog', 'information_schema')
+                          ORDER BY table_schema, table_name
+                      """)
+
+                      tables = cur.fetchall()
+
+                      print("\n===== EXISTING TABLES =====")
+
+                      if not tables:
+                          print("No application tables found.")
+
+                      for table_schema, table_name in tables:
+                          print(f"\nTABLE: {table_schema}.{table_name}")
+
+                          cur.execute("""
+                              SELECT column_name, data_type, is_nullable
+                              FROM information_schema.columns
+                              WHERE table_schema = %s
+                                AND table_name = %s
+                              ORDER BY ordinal_position
+                          """, (table_schema, table_name))
+
+                          for column in cur.fetchall():
+                              print(
+                                  f"  {column[0]} | "
+                                  f"{column[1]} | "
+                                  f"NULLABLE={column[2]}"
+                              )
+
+              print("\nDATABASE AUDIT SUCCESS")
+
+          except Exception as exc:
+              print("AUDIT FAILED:", type(exc).__name__)
+              sys.exit(1)
+          PY
+
+      - name: Audit SQLite usage in backend
+        shell: bash
+        run: |
+          echo "===== SQLITE REFERENCES ====="
+
+          grep -RInE \
+            "sqlite3.connect|sqlite3|DATABASE_URL|create_engine" \
+            backend/app \
+            --include="*.py" \
+            || true
+
+          echo "===== AUDIT COMPLETE ====="
