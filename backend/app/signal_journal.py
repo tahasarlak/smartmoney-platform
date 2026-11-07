@@ -1,219 +1,139 @@
+"""Signal journal backed by Neon PostgreSQL.
+
+Public signals have visibility='public' and user_id=NULL. Private signals
+require an authenticated owner. Existing callers remain compatible and
+create public research signals unless user_id/visibility are supplied.
+"""
 from __future__ import annotations
-import json
-import math
-import os
-import sqlite3
-import uuid
+import math, uuid
 from datetime import datetime, timezone
-from pathlib import Path
 from typing import Any
+from sqlalchemy import select, and_, or_
+from .database import session_scope, get_session_factory
+from .db_models import Signal, SignalEvent
 
-DEFAULT_DB = Path(__file__).resolve().parents[1] / "data" / "trade_journal.sqlite3"
+def init_db() -> None:
+    """Compatibility no-op. Alembic owns schema creation."""
+    return None
 
-def _db_path() -> Path:
-    raw = os.getenv("TRADE_JOURNAL_DB")
-    path = Path(raw).expanduser() if raw else DEFAULT_DB
-    path.parent.mkdir(parents=True, exist_ok=True)
-    return path
-
-def _connect():
-    con = sqlite3.connect(_db_path(), timeout=10)
-    con.row_factory = sqlite3.Row
-    con.execute("PRAGMA journal_mode=WAL")
-    con.execute("PRAGMA foreign_keys=ON")
-    return con
-
-def init_db():
-    with _connect() as con:
-        con.executescript("""
-        CREATE TABLE IF NOT EXISTS signals (
-          id TEXT PRIMARY KEY,
-          symbol TEXT NOT NULL,
-          direction TEXT NOT NULL CHECK(direction IN ('bullish','bearish')),
-          status TEXT NOT NULL,
-          setup_class TEXT,
-          quality_score INTEGER,
-          entry REAL NOT NULL,
-          stop_loss REAL NOT NULL,
-          tp1 REAL NOT NULL,
-          tp2 REAL NOT NULL,
-          tp3 REAL NOT NULL,
-          zone_low REAL,
-          zone_high REAL,
-          min_rr REAL,
-          risk_percent REAL,
-          created_at TEXT NOT NULL,
-          updated_at TEXT NOT NULL,
-          last_price REAL,
-          last_price_at TEXT,
-          closed_at TEXT,
-          close_reason TEXT,
-          source TEXT NOT NULL DEFAULT 'research'
-        );
-        CREATE INDEX IF NOT EXISTS idx_signals_status_created
-          ON signals(status, created_at DESC);
-        CREATE INDEX IF NOT EXISTS idx_signals_symbol_created
-          ON signals(symbol, created_at DESC);
-        CREATE TABLE IF NOT EXISTS signal_events (
-          id INTEGER PRIMARY KEY AUTOINCREMENT,
-          signal_id TEXT NOT NULL REFERENCES signals(id),
-          event_type TEXT NOT NULL,
-          old_status TEXT,
-          new_status TEXT,
-          price REAL,
-          note TEXT,
-          created_at TEXT NOT NULL
-        );
-        """)
-
-def _now() -> str:
-    return datetime.now(timezone.utc).isoformat()
+def _now(): return datetime.now(timezone.utc)
 
 def _row(row):
     if row is None: return None
-    item=dict(row)
-    item["take_profits"]=[
-        {"name":"TP1","price":item.pop("tp1")},
-        {"name":"TP2","price":item.pop("tp2")},
-        {"name":"TP3","price":item.pop("tp3")},
+    item = {c.name: getattr(row, c.name) for c in row.__table__.columns}
+    item["take_profits"] = [
+        {"name": "TP1", "price": item.pop("tp1")},
+        {"name": "TP2", "price": item.pop("tp2")},
+        {"name": "TP3", "price": item.pop("tp3")},
     ]
+    for key in ("created_at", "updated_at"):
+        if item.get(key): item[key] = item[key].isoformat()
     return item
 
-def create_signal(plan: dict[str, Any]) -> dict[str, Any]:
-    if plan.get("status") not in ("pending_retest","zone_active"):
+def create_signal(plan: dict[str, Any], user_id: str | None = None,
+                  visibility: str = "public") -> dict[str, Any]:
+    if plan.get("status") not in ("pending_retest", "zone_active"):
         raise ValueError("Only a valid pending_retest or zone_active plan can be journaled")
     if plan.get("execution_allowed") is not False:
         raise ValueError("Research signal must not enable execution")
-    direction=plan.get("direction")
-    entry=float(plan["entry"]); stop=float(plan["stop_loss"])
-    targets=plan.get("take_profits") or []
-    if direction not in ("bullish","bearish") or len(targets)<3:
+    if visibility not in ("public", "private"):
+        raise ValueError("visibility must be public or private")
+    if visibility == "private" and not user_id:
+        raise ValueError("Private signals require an authenticated user_id")
+    if visibility == "public": user_id = None
+    direction = plan.get("direction")
+    entry, stop = float(plan["entry"]), float(plan["stop_loss"])
+    targets = plan.get("take_profits") or []
+    if direction not in ("bullish", "bearish") or len(targets) < 3:
         raise ValueError("Incomplete trade plan")
-    tp=[float(x["price"]) for x in targets[:3]]
-    if direction=="bullish" and not stop < entry < tp[0] < tp[1] < tp[2]:
+    tp = [float(x["price"]) for x in targets[:3]]
+    if direction == "bullish" and not stop < entry < tp[0] < tp[1] < tp[2]:
         raise ValueError("Invalid bullish price ordering")
-    if direction=="bearish" and not stop > entry > tp[0] > tp[1] > tp[2]:
+    if direction == "bearish" and not stop > entry > tp[0] > tp[1] > tp[2]:
         raise ValueError("Invalid bearish price ordering")
-    now=_now(); sid=str(uuid.uuid4())
-    zone=plan.get("zone") or {}
-    with _connect() as con:
-        con.execute("""INSERT INTO signals
-        (id,symbol,direction,status,setup_class,quality_score,entry,stop_loss,tp1,tp2,tp3,
-         zone_low,zone_high,min_rr,risk_percent,created_at,updated_at,last_price,source)
-        VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
-        (sid,plan["symbol"],direction,"WAITING_ENTRY",plan.get("setup_class"),
-         int(plan.get("quality_score",0)),entry,stop,*tp,zone.get("low"),zone.get("high"),
-         plan.get("minimum_rr_requested"),plan.get("risk_percent_setting"),now,now,
-         plan.get("current_price"),"research"))
-        con.execute("""INSERT INTO signal_events
-        (signal_id,event_type,new_status,price,note,created_at)
-        VALUES (?,?,?,?,?,?)""",
-        (sid,"SIGNAL_CREATED","WAITING_ENTRY",plan.get("current_price"),
-         "Research-only plan saved; no broker order sent.",now))
-        row=con.execute("SELECT * FROM signals WHERE id=?",(sid,)).fetchone()
-    return _row(row)
+    now, sid, zone = _now(), str(uuid.uuid4()), plan.get("zone") or {}
+    with session_scope() as db:
+        row = Signal(id=sid, user_id=user_id, visibility=visibility,
+            symbol=str(plan["symbol"]).upper(), direction=direction,
+            status="WAITING_ENTRY", setup_class=plan.get("setup_class"),
+            quality_score=int(plan.get("quality_score", 0)), entry=entry,
+            stop_loss=stop, tp1=tp[0], tp2=tp[1], tp3=tp[2],
+            zone_low=zone.get("low"), zone_high=zone.get("high"),
+            min_rr=plan.get("minimum_rr_requested"),
+            risk_percent=plan.get("risk_percent_setting"), created_at=now,
+            updated_at=now, last_price=plan.get("current_price"), source="research")
+        db.add(row)
+        db.add(SignalEvent(signal_id=sid, event_type="SIGNAL_CREATED",
+            new_status="WAITING_ENTRY", price=plan.get("current_price"),
+            note="Research-only plan saved; no broker order sent.", created_at=now))
+        db.flush()
+        return _row(row)
 
-def get_signal(signal_id: str):
-    with _connect() as con:
-        return _row(con.execute("SELECT * FROM signals WHERE id=?",(signal_id,)).fetchone())
+def _visibility_filter(user_id: str | None):
+    if user_id:
+        return or_(Signal.visibility == "public",
+                   and_(Signal.visibility == "private", Signal.user_id == user_id))
+    return Signal.visibility == "public"
 
-def list_signals(status: str | None=None, symbol: str | None=None, limit: int=100):
-    clauses=[]; args=[]
-    if status:
-        clauses.append("status=?"); args.append(status.upper())
-    if symbol:
-        clauses.append("symbol=?"); args.append(symbol.upper())
-    where=(" WHERE "+" AND ".join(clauses)) if clauses else ""
-    with _connect() as con:
-        rows=con.execute("SELECT * FROM signals"+where+" ORDER BY created_at DESC LIMIT ?",
-                         (*args,limit)).fetchall()
-    return [_row(r) for r in rows]
+def get_signal(signal_id: str, user_id: str | None = None):
+    with get_session_factory()() as db:
+        row = db.scalar(select(Signal).where(Signal.id == signal_id, _visibility_filter(user_id)))
+        return _row(row)
 
-def signal_events(signal_id: str):
-    with _connect() as con:
-        if not con.execute("SELECT 1 FROM signals WHERE id=?",(signal_id,)).fetchone():
-            return None
-        rows=con.execute("SELECT * FROM signal_events WHERE signal_id=? ORDER BY id",
-                         (signal_id,)).fetchall()
-    return [dict(r) for r in rows]
+def list_signals(status: str | None = None, symbol: str | None = None,
+                 limit: int = 100, user_id: str | None = None):
+    if not 1 <= int(limit) <= 500: raise ValueError("limit must be 1..500")
+    stmt = select(Signal).where(_visibility_filter(user_id))
+    if status: stmt = stmt.where(Signal.status == status.upper())
+    if symbol: stmt = stmt.where(Signal.symbol == symbol.upper())
+    stmt = stmt.order_by(Signal.created_at.desc()).limit(int(limit))
+    with get_session_factory()() as db:
+        return [_row(r) for r in db.scalars(stmt).all()]
 
-def update_signal_price(signal_id: str, price: float, timestamp: str | None=None):
+def signal_events(signal_id: str, user_id: str | None = None):
+    with get_session_factory()() as db:
+        exists = db.scalar(select(Signal.id).where(Signal.id == signal_id, _visibility_filter(user_id)))
+        if not exists: return None
+        rows = db.scalars(select(SignalEvent).where(SignalEvent.signal_id == signal_id).order_by(SignalEvent.id)).all()
+        return [{c.name: getattr(r, c.name) for c in r.__table__.columns} for r in rows]
+
+def update_signal_price(signal_id: str, price: float, timestamp: str | None = None,
+                        user_id: str | None = None):
     price = float(price)
-    if not math.isfinite(price) or price <= 0:
-        raise ValueError("Price must be a finite positive number")
-    now=timestamp or _now()
-    with _connect() as con:
-        row=con.execute("SELECT * FROM signals WHERE id=?",(signal_id,)).fetchone()
+    if not math.isfinite(price) or price <= 0: raise ValueError("Price must be a finite positive number")
+    now_text = timestamp or _now().isoformat()
+    with session_scope() as db:
+        row = db.scalar(select(Signal).where(Signal.id == signal_id,
+            _visibility_filter(user_id)).with_for_update())
         if row is None: return None
-        old=row["status"]; new=old; reason=None
-        if old in ("WAITING_ENTRY","OPEN","TP1_HIT","TP2_HIT"):
-            direction=row["direction"]
-            entered = (
-                (price <= row["entry"]) if direction == "bullish"
-                else (price >= row["entry"])
-            )
+        old, new, reason = row.status, row.status, None
+        if old in ("WAITING_ENTRY", "OPEN", "TP1_HIT", "TP2_HIT"):
+            entered = price <= row.entry if row.direction == "bullish" else price >= row.entry
             if old == "WAITING_ENTRY" and entered:
-                new = "OPEN"
-                reason = "Entry level reached by supplied price update"
-
-            # Evaluate the furthest reached target on this tick. Trade feeds can
-            # gap across multiple levels between messages, so do not require a
-            # separate tick at every TP. Stop-loss has priority if the same
-            # observed price is already beyond the stop.
+                new, reason = "OPEN", "Entry level reached by supplied price update"
             if new != "WAITING_ENTRY":
-                if direction == "bullish":
-                    stopped = price <= row["stop_loss"]
-                    hit3 = price >= row["tp3"]
-                    hit2 = price >= row["tp2"]
-                    hit1 = price >= row["tp1"]
+                if row.direction == "bullish":
+                    stopped, hit3, hit2, hit1 = price <= row.stop_loss, price >= row.tp3, price >= row.tp2, price >= row.tp1
                 else:
-                    stopped = price >= row["stop_loss"]
-                    hit3 = price <= row["tp3"]
-                    hit2 = price <= row["tp2"]
-                    hit1 = price <= row["tp1"]
-
-                if stopped:
-                    new = "STOPPED"
-                    reason = "Stop-loss level reached"
-                elif hit3:
-                    new = "TP3_HIT"
-                    reason = "Third target reached"
-                elif hit2 and old in ("OPEN", "TP1_HIT", "TP2_HIT"):
-                    new = "TP2_HIT"
-                    reason = "Second target reached"
-                elif hit1 and old in ("OPEN", "TP1_HIT"):
-                    new = "TP1_HIT"
-                    reason = "First target reached"
-        closed_at=now if new in ("STOPPED","TP3_HIT") else row["closed_at"]
-        con.execute("""UPDATE signals SET status=?,updated_at=?,last_price=?,last_price_at=?,
-                       closed_at=?,close_reason=? WHERE id=?""",
-                    (new,now,price,now,closed_at,reason,signal_id))
+                    stopped, hit3, hit2, hit1 = price >= row.stop_loss, price <= row.tp3, price <= row.tp2, price <= row.tp1
+                if stopped: new, reason = "STOPPED", "Stop-loss level reached"
+                elif hit3: new, reason = "TP3_HIT", "Third target reached"
+                elif hit2 and old in ("OPEN", "TP1_HIT", "TP2_HIT"): new, reason = "TP2_HIT", "Second target reached"
+                elif hit1 and old in ("OPEN", "TP1_HIT"): new, reason = "TP1_HIT", "First target reached"
+        row.status, row.updated_at, row.last_price, row.last_price_at = new, _now(), price, now_text
+        if new in ("STOPPED", "TP3_HIT"): row.closed_at, row.close_reason = now_text, reason
         if new != old:
-            con.execute("""INSERT INTO signal_events
-            (signal_id,event_type,old_status,new_status,price,note,created_at)
-            VALUES (?,?,?,?,?,?,?)""",
-            (signal_id,"STATUS_CHANGED",old,new,price,reason,now))
-        updated=con.execute("SELECT * FROM signals WHERE id=?",(signal_id,)).fetchone()
-    return _row(updated)
-
-
+            db.add(SignalEvent(signal_id=signal_id, event_type="STATUS_CHANGED",
+                old_status=old, new_status=new, price=price, note=reason, created_at=_now()))
+        db.flush()
+        return _row(row)
 
 def closed_signal_outcomes(limit: int = 5000) -> list[dict[str, Any]]:
-    """Return only terminal journal outcomes; TP1/TP2 are not counted as wins."""
-    if not 1 <= limit <= 20000:
-        raise ValueError("limit must be 1..20000")
-    with _connect() as con:
-        rows = con.execute(
-            "SELECT id,symbol,quality_score,status,closed_at,close_reason "
-            "FROM signals WHERE status IN ('TP3_HIT','STOPPED') "
-            "AND closed_at IS NOT NULL ORDER BY closed_at ASC LIMIT ?",
-            (limit,),
-        ).fetchall()
-    return [{
-        "signal_id": row["id"],
-        "symbol": row["symbol"],
-        "quality_score": int(row["quality_score"] or 0),
-        "won": row["status"] == "TP3_HIT",
-        "closed_at": row["closed_at"],
-        "status": row["status"],
-    } for row in rows]
+    if not 1 <= limit <= 20000: raise ValueError("limit must be 1..20000")
+    with get_session_factory()() as db:
+        rows = db.execute(select(Signal.id, Signal.symbol, Signal.quality_score,
+            Signal.status, Signal.closed_at, Signal.close_reason)
+            .where(Signal.status.in_(("TP3_HIT", "STOPPED")), Signal.closed_at.is_not(None))
+            .order_by(Signal.closed_at.asc()).limit(limit)).all()
+    return [{"signal_id": r.id, "symbol": r.symbol, "quality_score": int(r.quality_score or 0),
+             "won": r.status == "TP3_HIT", "closed_at": r.closed_at, "status": r.status} for r in rows]
