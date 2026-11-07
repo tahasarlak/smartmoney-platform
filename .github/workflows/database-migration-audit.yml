@@ -1,0 +1,132 @@
+
+name: SmartMoney V11 - Database Migration Audit
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  source-audit:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Prepare source bundle
+        shell: bash
+        run: |
+          mkdir -p migration-audit/backend/app
+          mkdir -p migration-audit/backend/tests
+
+          files=(
+            backend/app/main.py
+            backend/app/config.py
+            backend/app/market_store.py
+            backend/app/v11_platform.py
+            backend/app/signal_journal.py
+            backend/app/schemas.py
+            backend/app/advanced_schemas.py
+            backend/app/signal_schemas.py
+            backend/app/backtesting.py
+            backend/app/multi_backtesting.py
+            backend/requirements.txt
+            backend/tests/test_market_store_v9.py
+            backend/tests/test_signal_journal_v6.py
+            backend/tests/test_v11_platform.py
+          )
+
+          for file in "${files[@]}"; do
+            if [ -f "$file" ]; then
+              mkdir -p "migration-audit/$(dirname "$file")"
+              cp "$file" "migration-audit/$file"
+            else
+              echo "MISSING: $file"
+            fi
+          done
+
+          cat > migration-audit/README.txt <<'EOF'
+          SmartMoney V11 Database Migration Audit
+          Source files only.
+          No database credentials or SQLite database files included.
+          EOF
+
+          cd migration-audit
+          zip -r ../smartmoney-migration-audit.zip .
+
+      - name: Upload source bundle
+        uses: actions/upload-artifact@v4
+        with:
+          name: smartmoney-migration-audit
+          path: smartmoney-migration-audit.zip
+          retention-days: 3
+          if-no-files-found: error
+
+name: SmartMoney V11 - Database Migration Audit
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  source-audit:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Prepare source bundle
+        shell: bash
+        run: |
+          mkdir -p migration-audit/backend/app
+          mkdir -p migration-audit/backend/tests
+
+          files=(
+            backend/app/main.py
+            backend/app/config.py
+            backend/app/market_store.py
+            backend/app/v11_platform.py
+            backend/app/signal_journal.py
+            backend/app/schemas.py
+            backend/app/advanced_schemas.py
+            backend/app/signal_schemas.py
+            backend/app/backtesting.py
+            backend/app/multi_backtesting.py
+            backend/requirements.txt
+            backend/tests/test_market_store_v9.py
+            backend/tests/test_signal_journal_v6.py
+            backend/tests/test_v11_platform.py
+          )
+
+          for file in "${files[@]}"; do
+            if [ -f "$file" ]; then
+              mkdir -p "migration-audit/$(dirname "$file")"
+              cp "$file" "migration-audit/$file"
+            else
+              echo "MISSING: $file"
+            fi
+          done
+
+          cat > migration-audit/README.txt <<'EOF'
+          SmartMoney V11 Database Migration Audit
+          Source files only.
+          No database credentials or SQLite database files included.
+          EOF
+
+          cd migration-audit
+          zip -r ../smartmoney-migration-audit.zip .
+
+      - name: Upload source bundle
+        uses: actions/upload-artifact@v4
+        with:
+          name: smartmoney-migration-audit
+          path: smartmoney-migration-audit.zip
+          retention-days: 3
+          if-no-files-found: error
