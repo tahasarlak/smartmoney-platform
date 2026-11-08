@@ -66,3 +66,11 @@ class MultiSymbolBacktestRequest(BaseModel):
     max_daily_loss_pct: float = Field(default=3, ge=0, le=100)
     max_weekly_loss_pct: float = Field(default=6, ge=0, le=100)
     max_drawdown_pct: float = Field(default=15, ge=0, le=100)
+
+
+class StrategyValidationRequest(MultiSymbolBacktestRequest):
+    """Rolling OOS validation controls layered on the shared portfolio input."""
+    folds: int = Field(default=4, ge=2, le=10)
+    monte_carlo_simulations: int = Field(default=1000, ge=100, le=5000)
+    random_seed: int = Field(default=42, ge=0, le=4294967295)
+    stress_cost_multiplier: float = Field(default=2.0, ge=1.0, le=10.0)

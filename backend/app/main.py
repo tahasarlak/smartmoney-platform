@@ -24,7 +24,8 @@ from .risk_controls import evaluate_risk
 from .backtesting import run_bar_backtest
 from .multi_backtesting import run_multi_symbol_backtest
 from .calibration import evaluate_calibration
-from .advanced_schemas import RiskPreflightRequest, BacktestRequest, MultiSymbolBacktestRequest
+from .advanced_schemas import RiskPreflightRequest, BacktestRequest, MultiSymbolBacktestRequest, StrategyValidationRequest
+from .strategy_validation import validate_strategy_walk_forward
 from .signal_journal import (
     create_signal,
     get_signal,
@@ -492,6 +493,27 @@ def backtest_replay(payload: BacktestRequest):
         raise HTTPException(status_code=422, detail=str(exc))
 
 
+
+
+@app.post("/api/v1/backtest/validate")
+def strategy_validation(payload: StrategyValidationRequest):
+    """Run rolling out-of-sample replay, Monte Carlo and cost stress analysis."""
+    try:
+        data = payload.model_dump()
+        controls = {
+            "folds": data.pop("folds"),
+            "monte_carlo_simulations": data.pop("monte_carlo_simulations"),
+            "random_seed": data.pop("random_seed"),
+            "stress_cost_multiplier": data.pop("stress_cost_multiplier"),
+        }
+        return validate_strategy_walk_forward(
+            candles_by_symbol=data.pop("candles_by_symbol"),
+            signals=data.pop("signals"),
+            **data,
+            **controls,
+        )
+    except (KeyError, TypeError, ValueError) as exc:
+        raise HTTPException(status_code=422, detail=str(exc))
 
 
 @app.post("/api/v1/backtest/multi-symbol")
