@@ -48,3 +48,6 @@ test_neon_connection.py
 
 # Phase 7 local installer backups
 .phase7-backups/
+
+# Phase 8 local installer backups
+.phase8-backups/

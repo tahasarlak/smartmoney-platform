@@ -18,7 +18,11 @@ from sqlalchemy.orm import Session as OrmSession
 from .database import get_session_factory
 from .db_models import (
     User, Session as LoginSession, Portfolio, BrokerAccount,
-    PaperOrder, AuditEvent, BacktestRun,
+    PaperOrder, AuditEvent, BacktestRun, ForwardTestRun, ForwardTestTrade,
+)
+from .risk_engine import (
+    calculate_risk_position_size, calculate_correlation_matrix,
+    assess_portfolio_risk, allocate_capital,
 )
 from .forward_testing import (
     start_forward_run, stop_forward_run, list_forward_runs,
@@ -603,6 +607,33 @@ class ClosePaperOrderRequest(BaseModel):
     exit_price: float = Field(gt=0)
 
 
+class RiskPositionSizeRequest(BaseModel):
+    equity: float = Field(gt=0)
+    risk_pct: float = Field(gt=0, le=100)
+    entry: float = Field(gt=0)
+    stop: float = Field(gt=0)
+    max_notional_pct: float = Field(default=100.0, gt=0, le=1000)
+
+
+class RiskCorrelationRequest(BaseModel):
+    prices_by_symbol: dict[str, list[float]] = Field(min_length=2, max_length=50)
+    min_observations: int = Field(default=20, ge=3, le=5000)
+
+
+class RiskAllocationCandidate(BaseModel):
+    symbol: str = Field(min_length=1, max_length=40)
+    direction: str = Field(pattern="^(long|short)$")
+    entry: float = Field(gt=0)
+    stop: float = Field(gt=0)
+    quality_score: float = Field(ge=0, le=100)
+    correlation_group: str | None = Field(default=None, max_length=64)
+
+
+class RiskAllocationRequest(BaseModel):
+    candidates: list[RiskAllocationCandidate] = Field(min_length=1, max_length=50)
+    requested_budget_pct: float | None = Field(default=None, gt=0, le=100)
+
+
 class ForwardTestStartRequest(BaseModel):
     portfolio_id: str
     account_id: str
@@ -861,3 +892,137 @@ def api_get_portfolio(portfolio_id: str, user=Depends(current_user)):
         return get_portfolio(user["id"], portfolio_id)
     except LookupError as exc:
         raise HTTPException(status_code=404, detail=str(exc))
+
+
+@router.post("/risk/position-size")
+def api_risk_position_size(payload: RiskPositionSizeRequest, user=Depends(current_user)):
+    try:
+        result = calculate_risk_position_size(**payload.model_dump())
+        result["user_id"] = user["id"]
+        return result
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc))
+
+
+@router.post("/risk/correlation")
+def api_risk_correlation(payload: RiskCorrelationRequest, user=Depends(current_user)):
+    try:
+        result = calculate_correlation_matrix(
+            payload.prices_by_symbol, payload.min_observations
+        )
+        result["user_id"] = user["id"]
+        return result
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc))
+
+
+def _portfolio_risk_inputs(user_id: str, portfolio_id: str):
+    db = _session()
+    try:
+        portfolio = _owned_portfolio(db, user_id, portfolio_id)
+        paper_orders = db.scalars(select(PaperOrder).where(
+            PaperOrder.user_id == user_id,
+            PaperOrder.portfolio_id == portfolio_id,
+            PaperOrder.status == "open",
+        )).all()
+        forward_runs = db.scalars(select(ForwardTestRun).where(
+            ForwardTestRun.user_id == user_id,
+            ForwardTestRun.portfolio_id == portfolio_id,
+        )).all()
+        run_ids = [r.id for r in forward_runs if r.status == "active"]
+        forward_trades = []
+        if run_ids:
+            forward_trades = db.scalars(select(ForwardTestTrade).where(
+                ForwardTestTrade.user_id == user_id,
+                ForwardTestTrade.portfolio_id == portfolio_id,
+                ForwardTestTrade.run_id.in_(run_ids),
+                ForwardTestTrade.status.in_(("pending_entry", "open", "tp1_hit", "tp2_hit")),
+                ForwardTestTrade.remaining_quantity > 0,
+            )).all()
+        realized_paper = db.scalar(select(func.coalesce(func.sum(PaperOrder.realized_pnl), 0)).where(
+            PaperOrder.user_id == user_id, PaperOrder.portfolio_id == portfolio_id,
+            PaperOrder.status == "closed",
+        )) or 0.0
+        realized_forward = sum(float(r.realized_pnl or 0.0) for r in forward_runs)
+        equity = float(portfolio.initial_equity) + float(realized_paper) + realized_forward
+        if not math.isfinite(equity) or equity <= 0:
+            raise ValueError("Portfolio equity is not positive")
+        positions = []
+        for order in paper_orders:
+            positions.append({
+                "symbol": order.symbol, "direction": order.side,
+                "quantity": float(order.quantity), "entry_price": float(order.entry_price),
+                "stop_loss": float(order.stop_loss), "risk_cash": float(order.risk_cash),
+                "source": "paper_order",
+            })
+        for trade in forward_trades:
+            qty = float(trade.remaining_quantity)
+            original_qty = float(trade.quantity)
+            scale = qty / original_qty if original_qty > 0 else 0.0
+            entry = float(trade.actual_entry or trade.planned_entry)
+            positions.append({
+                "symbol": trade.symbol, "direction": trade.direction,
+                "quantity": qty, "entry_price": entry,
+                "stop_loss": float(trade.stop_loss),
+                "risk_cash": max(0.0, float(trade.risk_cash) * scale),
+                "source": "forward_test",
+            })
+        return {
+            "equity": equity,
+            "positions": positions,
+            "max_portfolio_risk_pct": float(portfolio.max_portfolio_risk_pct),
+            "max_trade_risk_pct": float(portfolio.max_trade_risk_pct),
+            "max_open_trades": int(portfolio.max_open_trades),
+            "portfolio_id": portfolio_id,
+            "paper_position_count": len(paper_orders),
+            "forward_position_count": len(forward_trades),
+        }
+    finally:
+        db.close()
+
+
+@router.get("/portfolios/{portfolio_id}/risk")
+def api_portfolio_risk_assessment(portfolio_id: str, user=Depends(current_user)):
+    try:
+        snapshot = _portfolio_risk_inputs(user["id"], portfolio_id)
+        report = assess_portfolio_risk(
+            equity=snapshot["equity"], positions=snapshot["positions"],
+            max_portfolio_risk_pct=snapshot["max_portfolio_risk_pct"],
+            max_trade_risk_pct=snapshot["max_trade_risk_pct"],
+            max_open_trades=snapshot["max_open_trades"],
+        )
+        report.update({
+            "portfolio_id": portfolio_id,
+            "paper_position_count": snapshot["paper_position_count"],
+            "forward_position_count": snapshot["forward_position_count"],
+            "data_scope": "open paper orders plus open trades from active forward-test runs",
+        })
+        return report
+    except LookupError as exc:
+        raise HTTPException(status_code=404, detail=str(exc))
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc))
+
+
+@router.post("/portfolios/{portfolio_id}/risk/allocate")
+def api_portfolio_risk_allocate(
+    portfolio_id: str, payload: RiskAllocationRequest, user=Depends(current_user)
+):
+    try:
+        snapshot = _portfolio_risk_inputs(user["id"], portfolio_id)
+        report = allocate_capital(
+            equity=snapshot["equity"],
+            candidates=[x.model_dump() for x in payload.candidates],
+            current_open_risk_cash=sum(float(x["risk_cash"]) for x in snapshot["positions"]),
+            max_portfolio_risk_pct=snapshot["max_portfolio_risk_pct"],
+            max_trade_risk_pct=snapshot["max_trade_risk_pct"],
+            max_open_trades=snapshot["max_open_trades"],
+            current_open_positions=len(snapshot["positions"]),
+            requested_budget_pct=payload.requested_budget_pct,
+        )
+        report["portfolio_id"] = portfolio_id
+        return report
+    except LookupError as exc:
+        raise HTTPException(status_code=404, detail=str(exc))
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc))
