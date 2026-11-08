@@ -1692,3 +1692,67 @@ def api_portfolio_walk_forward_validation(
         raise HTTPException(status_code=404, detail=str(exc))
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc))
+
+
+from .monte_carlo_research import run_monte_carlo
+from .robustness_research import build_robustness_report
+from .research_final_audit import build_research_audit
+
+
+@router.get("/portfolios/{portfolio_id}/monte-carlo")
+def api_portfolio_monte_carlo(
+    portfolio_id: str, limit: int = 500, simulations: int = 2000, horizon: int = 100,
+    user=Depends(current_user),
+):
+    if not 1 <= limit <= 500:
+        raise HTTPException(status_code=422, detail="limit must be between 1 and 500")
+    try:
+        portfolio = get_portfolio(user["id"], portfolio_id)
+        trades = list_execution_trades(user["id"], portfolio_id, status=None, limit=limit)
+        result = run_monte_carlo(trades=trades, simulations=simulations, horizon=horizon)
+        result.update({"portfolio_id": portfolio_id, "portfolio_name": portfolio["name"],
+                       "trades_returned": len(trades), "truncated": len(trades) >= limit})
+        return result
+    except LookupError as exc:
+        raise HTTPException(status_code=404, detail=str(exc))
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc))
+
+
+@router.get("/portfolios/{portfolio_id}/robustness")
+def api_portfolio_robustness(
+    portfolio_id: str, limit: int = 500, cost_stress_r: float = 0.05, windows: int = 4,
+    user=Depends(current_user),
+):
+    if not 1 <= limit <= 500:
+        raise HTTPException(status_code=422, detail="limit must be between 1 and 500")
+    try:
+        portfolio = get_portfolio(user["id"], portfolio_id)
+        trades = list_execution_trades(user["id"], portfolio_id, status=None, limit=limit)
+        result = build_robustness_report(trades=trades, cost_stress_r=cost_stress_r, windows=windows)
+        result.update({"portfolio_id": portfolio_id, "portfolio_name": portfolio["name"],
+                       "trades_returned": len(trades), "truncated": len(trades) >= limit})
+        return result
+    except LookupError as exc:
+        raise HTTPException(status_code=404, detail=str(exc))
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc))
+
+
+@router.get("/portfolios/{portfolio_id}/research-audit")
+def api_portfolio_research_audit(
+    portfolio_id: str, limit: int = 500, user=Depends(current_user),
+):
+    if not 1 <= limit <= 500:
+        raise HTTPException(status_code=422, detail="limit must be between 1 and 500")
+    try:
+        portfolio = get_portfolio(user["id"], portfolio_id)
+        trades = list_execution_trades(user["id"], portfolio_id, status=None, limit=limit)
+        result = build_research_audit(trades=trades, portfolio=portfolio)
+        result.update({"portfolio_id": portfolio_id, "portfolio_name": portfolio["name"],
+                       "trades_returned": len(trades), "truncated": len(trades) >= limit})
+        return result
+    except LookupError as exc:
+        raise HTTPException(status_code=404, detail=str(exc))
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc))
