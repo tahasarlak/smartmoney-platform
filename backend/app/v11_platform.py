@@ -23,7 +23,7 @@ from .db_models import (
 )
 from .risk_engine import (
     calculate_risk_position_size, calculate_correlation_matrix,
-    assess_portfolio_risk, allocate_capital,
+    assess_portfolio_risk, allocate_capital, allocate_capital_with_correlation,
 )
 from .execution_engine import (
     validate_execution_plan, process_trade_tick, cancel_pending_trade,
@@ -651,6 +651,16 @@ class RiskAllocationRequest(BaseModel):
     requested_budget_pct: float | None = Field(default=None, gt=0, le=100)
 
 
+
+
+class CorrelationAwareRiskAllocationRequest(BaseModel):
+    candidates: list[RiskAllocationCandidate] = Field(min_length=1, max_length=50)
+    prices_by_symbol: dict[str, list[float]] = Field(min_length=2, max_length=50)
+    requested_budget_pct: float | None = Field(default=None, gt=0, le=100)
+    correlation_penalty_strength: float = Field(default=1.0, ge=0, le=5)
+    min_observations: int = Field(default=20, ge=3, le=5000)
+
+
 class ForwardTestStartRequest(BaseModel):
     portfolio_id: str
     account_id: str
@@ -1093,6 +1103,36 @@ def api_portfolio_risk_allocate(
             max_open_trades=snapshot["max_open_trades"],
             current_open_positions=len(snapshot["positions"]),
             requested_budget_pct=payload.requested_budget_pct,
+        )
+        report["portfolio_id"] = portfolio_id
+        return report
+    except LookupError as exc:
+        raise HTTPException(status_code=404, detail=str(exc))
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc))
+
+
+@router.post("/portfolios/{portfolio_id}/risk/allocate-correlated")
+def api_portfolio_risk_allocate_correlated(
+    portfolio_id: str,
+    payload: CorrelationAwareRiskAllocationRequest,
+    user=Depends(current_user),
+):
+    """Return correlation-adjusted paper allocation suggestions; never submits orders."""
+    try:
+        snapshot = _portfolio_risk_inputs(user["id"], portfolio_id)
+        report = allocate_capital_with_correlation(
+            equity=snapshot["equity"],
+            candidates=[x.model_dump() for x in payload.candidates],
+            prices_by_symbol=payload.prices_by_symbol,
+            current_open_risk_cash=sum(float(x["risk_cash"]) for x in snapshot["positions"]),
+            max_portfolio_risk_pct=snapshot["max_portfolio_risk_pct"],
+            max_trade_risk_pct=snapshot["max_trade_risk_pct"],
+            max_open_trades=snapshot["max_open_trades"],
+            current_open_positions=len(snapshot["positions"]),
+            requested_budget_pct=payload.requested_budget_pct,
+            correlation_penalty_strength=payload.correlation_penalty_strength,
+            min_observations=payload.min_observations,
         )
         report["portfolio_id"] = portfolio_id
         return report

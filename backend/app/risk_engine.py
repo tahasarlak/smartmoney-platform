@@ -261,3 +261,124 @@ def allocate_capital(
             "allocation_method": "quality_score_weighted_capped_by_per_trade_limit",
             "execution_allowed": False,
             "note": "Correlation groups are labels only in this phase; measured correlation is returned by the separate correlation endpoint."}
+
+
+def allocate_capital_with_correlation(
+    *, equity: float, candidates: list[dict[str, Any]],
+    prices_by_symbol: dict[str, list[float]], current_open_risk_cash: float,
+    max_portfolio_risk_pct: float, max_trade_risk_pct: float,
+    max_open_trades: int, current_open_positions: int,
+    requested_budget_pct: float | None = None,
+    correlation_penalty_strength: float = 1.0,
+    min_observations: int = 20,
+) -> dict[str, Any]:
+    """Heuristically reduce risk weights for candidates duplicating same-direction exposure.
+
+    Correlation is estimated from aligned, caller-supplied price histories. Effective
+    correlation is multiplied by trade-direction signs: positive values indicate
+    historically similar PnL direction. This is a conservative weighting heuristic,
+    not covariance optimization or a guarantee of future diversification.
+    """
+    if not math.isfinite(float(correlation_penalty_strength)) or not 0 <= correlation_penalty_strength <= 5:
+        raise ValueError("correlation_penalty_strength must be between 0 and 5")
+    if not isinstance(candidates, list) or not candidates:
+        raise ValueError("Provide at least one candidate")
+    symbols = [str(c.get("symbol", "")).strip().upper() for c in candidates]
+    if len(set(symbols)) != len(symbols):
+        raise ValueError("Correlation-aware allocation requires unique candidate symbols")
+    if not isinstance(prices_by_symbol, dict):
+        raise ValueError("prices_by_symbol must be a mapping")
+    missing = sorted(set(symbols) - {str(k).strip().upper() for k in prices_by_symbol})
+    if missing:
+        raise ValueError(f"Missing price history for candidate symbols: {', '.join(missing)}")
+
+    # Keep only candidate series and normalize symbol keys; the matrix function
+    # enforces positive finite prices, aligned lengths and sufficient observations.
+    normalized_prices = {
+        str(k).strip().upper(): v
+        for k, v in prices_by_symbol.items()
+        if str(k).strip().upper() in set(symbols)
+    }
+    correlation = calculate_correlation_matrix(normalized_prices, min_observations)
+    matrix = correlation["matrix"]
+
+    normalized_candidates = []
+    for raw in candidates:
+        item = dict(raw)
+        symbol = str(item.get("symbol", "")).strip().upper()
+        direction = str(item.get("direction", "")).strip().lower()
+        if direction not in ("long", "short"):
+            raise ValueError(f"Invalid direction for {symbol}")
+        normalized_candidates.append({**item, "symbol": symbol, "direction": direction})
+
+    direction_sign = {"long": 1.0, "short": -1.0}
+    diagnostics = {}
+    adjusted_candidates = []
+    for candidate in normalized_candidates:
+        symbol = candidate["symbol"]
+        effective_values = []
+        for other in normalized_candidates:
+            if other["symbol"] == symbol:
+                continue
+            raw_corr = matrix[symbol][other["symbol"]]
+            if raw_corr is None:
+                continue
+            effective = raw_corr * direction_sign[candidate["direction"]] * direction_sign[other["direction"]]
+            effective_values.append(effective)
+        positive_crowding = [max(0.0, value) for value in effective_values]
+        avg_crowding = (
+            sum(positive_crowding) / len(positive_crowding)
+            if positive_crowding else 0.0
+        )
+        penalty = 1.0 + correlation_penalty_strength * avg_crowding
+        original_score = float(candidate.get("quality_score", 0))
+        adjusted_score = original_score / penalty
+        diagnostics[symbol] = {
+            "average_effective_correlation": round(
+                sum(effective_values) / len(effective_values), 6
+            ) if effective_values else None,
+            "positive_correlation_crowding": round(avg_crowding, 6),
+            "correlation_penalty_factor": round(penalty, 6),
+            "original_quality_score": original_score,
+            "adjusted_allocation_score": round(adjusted_score, 6),
+            "comparable_pairs": len(effective_values),
+        }
+        adjusted_candidates.append({**candidate, "quality_score": adjusted_score})
+
+    base = allocate_capital(
+        equity=equity,
+        candidates=adjusted_candidates,
+        current_open_risk_cash=current_open_risk_cash,
+        max_portfolio_risk_pct=max_portfolio_risk_pct,
+        max_trade_risk_pct=max_trade_risk_pct,
+        max_open_trades=max_open_trades,
+        current_open_positions=current_open_positions,
+        requested_budget_pct=requested_budget_pct,
+    )
+    for allocation in base.get("allocations", []):
+        symbol = allocation["symbol"]
+        info = diagnostics[symbol]
+        allocation["quality_score"] = info["original_quality_score"]
+        allocation["adjusted_allocation_score"] = info["adjusted_allocation_score"]
+        allocation["average_effective_correlation"] = info["average_effective_correlation"]
+        allocation["positive_correlation_crowding"] = info["positive_correlation_crowding"]
+        allocation["correlation_penalty_factor"] = info["correlation_penalty_factor"]
+    base.update({
+        "correlation": {
+            "method": correlation["method"],
+            "return_observations": correlation["return_observations"],
+            "matrix": matrix,
+            "pairs": correlation["pairs"],
+            "penalty_strength": correlation_penalty_strength,
+            "direction_adjusted": True,
+        },
+        "candidate_diagnostics": diagnostics,
+        "allocation_method": "quality_score_weighted_with_direction_adjusted_correlation_penalty",
+        "execution_allowed": False,
+        "note": (
+            "Correlation reduces allocation weights for candidates with historically similar "
+            "direction-adjusted returns. This is a heuristic, not covariance optimization; "
+            "historical correlations can change. No orders are created."
+        ),
+    })
+    return base
