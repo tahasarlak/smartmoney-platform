@@ -5,6 +5,7 @@ import websockets
 from .signal_journal import list_signals, update_signal_price
 from .market_store import (init_market_store, list_watchlist, add_watchlist_symbol,
                            remove_watchlist_symbol, upsert_market_price, list_market_prices)
+from .operational_resilience import ExponentialBackoff
 
 log = logging.getLogger(__name__)
 ACTIVE_STATUSES = ("WAITING_ENTRY", "OPEN", "TP1_HIT", "TP2_HIT")
@@ -81,9 +82,27 @@ def apply_trade_event(event: dict[str, Any]) -> int:
     return changed
 
 class LivePriceMonitor:
-    def __init__(self, reconnect_delay: float = 3.0, refresh_symbols_seconds: int = 30):
-        self.reconnect_delay = reconnect_delay
+    def __init__(
+        self,
+        reconnect_delay: float = 3.0,
+        refresh_symbols_seconds: int = 30,
+        max_reconnect_delay: float = 60.0,
+        reconnect_jitter_fraction: float = 0.2,
+    ):
+        if reconnect_delay <= 0 or max_reconnect_delay < reconnect_delay:
+            raise ValueError("Reconnect delay requires 0 < base <= maximum")
+        self.reconnect_delay = float(reconnect_delay)
         self.refresh_symbols_seconds = refresh_symbols_seconds
+        self._backoff = ExponentialBackoff(
+            base_seconds=self.reconnect_delay,
+            max_seconds=float(max_reconnect_delay),
+            jitter_fraction=reconnect_jitter_fraction,
+        )
+        self._reconnects = 0
+        self._last_connected_at: str | None = None
+        self._last_disconnect_at: str | None = None
+        self._last_tick_monotonic: float | None = None
+        self._next_retry_seconds: float | None = None
         self._task: asyncio.Task | None = None
         self._stop = asyncio.Event()
         self._last_message_at: str | None = None
@@ -186,7 +205,17 @@ class LivePriceMonitor:
                 "execution_events_processed": self._execution_events_processed,
                 "cached_prices": len(self._prices),
                 "last_message_at": self._last_message_at,
-                "last_error": self._last_error, "execution_allowed": False}
+                "last_error": self._last_error,
+                "reconnects": self._reconnects,
+                "reconnect_attempt": self._backoff.attempts,
+                "last_connected_at": self._last_connected_at,
+                "last_disconnect_at": self._last_disconnect_at,
+                "next_retry_seconds": self._next_retry_seconds,
+                "data_stale_seconds": (
+                    max(0.0, time.monotonic() - self._last_tick_monotonic)
+                    if self._last_tick_monotonic is not None else None
+                ),
+                "execution_allowed": False}
 
     async def _run(self):
         while not self._stop.is_set():
@@ -202,7 +231,12 @@ class LivePriceMonitor:
                     continue
                 async with websockets.connect(build_stream_url(symbols), ping_interval=20,
                     ping_timeout=20, close_timeout=5, max_size=2**20) as ws:
+                    if self._last_connected_at is not None:
+                        self._reconnects += 1
                     self._connected = True
+                    self._last_connected_at = time.strftime(
+                        "%Y-%m-%dT%H:%M:%SZ", time.gmtime()
+                    )
                     self._last_error = None
                     last_refresh = time.monotonic()
                     while not self._stop.is_set():
@@ -221,6 +255,9 @@ class LivePriceMonitor:
                             # The database rejected an older tick. Do not let the
                             # in-memory snapshot regress behind persisted market data.
                             continue
+                        self._last_tick_monotonic = time.monotonic()
+                        self._backoff.reset()
+                        self._next_retry_seconds = None
 
                         current = self._prices.get(event["symbol"])
                         if (
@@ -261,9 +298,15 @@ class LivePriceMonitor:
                 self._last_error = f"{type(exc).__name__}: {exc}"
                 log.warning("Live price monitor reconnecting: %s", self._last_error)
             finally:
+                if self._connected:
+                    self._last_disconnect_at = time.strftime(
+                        "%Y-%m-%dT%H:%M:%SZ", time.gmtime()
+                    )
                 self._connected = False
             if not self._stop.is_set():
-                try: await asyncio.wait_for(self._stop.wait(), timeout=self.reconnect_delay)
+                delay = self._backoff.next_delay()
+                self._next_retry_seconds = round(delay, 3)
+                try: await asyncio.wait_for(self._stop.wait(), timeout=delay)
                 except asyncio.TimeoutError: pass
 
 live_price_monitor = LivePriceMonitor()

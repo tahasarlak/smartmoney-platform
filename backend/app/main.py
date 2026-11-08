@@ -41,6 +41,7 @@ from .v11_platform import router as v11_router
 from .live_strategy_router import router as live_strategy_router
 from .live_signal_monitor import live_signal_monitor
 from .paper_automation_router import router as paper_automation_router
+from .operational_resilience import build_operational_health
 
 
 @asynccontextmanager
@@ -84,6 +85,15 @@ def health():
         "environment": settings.app_env,
         "live_trading_enabled": False,
     }
+
+
+@app.get("/api/v1/monitor/operational-health")
+def operational_health():
+    """Read-only process health assembled from monitor telemetry; no DB query."""
+    return build_operational_health(
+        live_price_monitor.status(),
+        live_signal_monitor.status(),
+    )
 
 
 @app.get("/health/ready")
