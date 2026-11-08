@@ -2,7 +2,7 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
-  Activity, ArrowDownRight, ArrowUpRight, BarChart3, Bell, BookOpen,
+  Activity, ArrowDownRight, ArrowUpRight, Award, BarChart3, Bell, BookOpen, FileBarChart2, UserRound,
   CandlestickChart, CheckCircle2, ChevronDown, CircleHelp, Clock3,
   Cpu, Gauge, Globe2, LayoutDashboard, LineChart, Menu, RefreshCw,
   Search, Shield, ShieldAlert, Sparkles, Target, Wallet, X, Zap
@@ -186,6 +186,13 @@ export default function Home() {
       <div className="tradf-brand"><div className="tradf-logo">T</div><div><strong>TRADF<span>.</span></strong><small>SMART MONEY TERMINAL</small></div><button className="mobile-close" onClick={() => setMobileNav(false)} aria-label="Close menu"><X size={18}/></button></div>
       <div className="sidebar-label">{lang === "fa" ? "فضای کاری" : "WORKSPACE"}</div>
       <nav>{navItems.map(item => { const Icon = item.icon; return <button key={item.id} className={`nav-item ${active === item.id ? "active" : ""}`} onClick={() => go(item.id)}><Icon size={17}/><span>{item.label}</span>{active === item.id && <i/>}</button>; })}</nav>
+      <div className="sidebar-label">تحلیل و گزارش</div>
+      <nav className="tradf-route-nav">
+        <a className="nav-item" href="/analytics"><Activity size={17}/><span>سود و زیان پرتفوی</span></a>
+        <a className="nav-item" href="/strategies"><Award size={17}/><span>رتبه‌بندی اجراها</span></a>
+        <a className="nav-item" href="/reports"><FileBarChart2 size={17}/><span>گزارش عملکرد</span></a>
+        <a className="nav-item" href="/account"><UserRound size={17}/><span>حساب و اشتراک</span></a>
+      </nav>
       <div className="sidebar-spacer"/>
       <div className="sidebar-status"><div className="status-orb"/><div><b>{t.paper}</b><small>{t.researchOnly}</small></div></div>
       <a className="sidebar-v11" href="/v11"><Wallet size={16}/><span>{t.openWorkspace}</span><ArrowUpRight size={14}/></a>

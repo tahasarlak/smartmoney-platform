@@ -1,0 +1,19 @@
+"use client";
+import { useEffect, useState } from "react";
+import Link from "next/link";
+import { BadgeCheck, CreditCard, LogOut, ShieldCheck, UserRound } from "lucide-react";
+const API=(process.env.NEXT_PUBLIC_API_URL||"http://localhost:8000").replace(/\/$/,"");
+type User={id:string;email:string};
+export default function AccountPage(){const[token,setToken]=useState("");const[user,setUser]=useState<User|null>(null);const[error,setError]=useState("");const[loading,setLoading]=useState(false);const[message,setMessage]=useState("");
+ useEffect(()=>{setToken(localStorage.getItem("smartmoney_v11_token")||"")},[]);
+ useEffect(()=>{if(!token)return;let ok=true;setLoading(true);fetch(`${API}/api/v1/v11/auth/me`,{headers:{Authorization:`Bearer ${token}`},cache:"no-store"}).then(async r=>{const b=await r.json().catch(()=>({}));if(!r.ok)throw new Error(b.detail||`API ${r.status}`);if(ok)setUser(b)}).catch(e=>{if(ok)setError(e instanceof Error?e.message:"خطا")}).finally(()=>{if(ok)setLoading(false)});return()=>{ok=false}},[token]);
+ async function logout(){try{await fetch(`${API}/api/v1/v11/auth/logout`,{method:"POST",headers:{Authorization:`Bearer ${token}`}})}catch{}localStorage.removeItem("smartmoney_v11_token");setToken("");setUser(null);setMessage("از حساب خارج شدی.");}
+ return <main className="p2-wrap"><Header/><div className="p2-heading"><div><span className="p2-eyebrow">ACCOUNT & ACCESS</span><h1>حساب کاربری و اشتراک</h1><p>مدیریت هویت، امنیت و وضعیت دسترسی TRADF.</p></div></div>
+ {error&&<div className="p2-alert">{error}</div>}{message&&<div className="p2-success">{message}</div>}{loading&&<p className="p2-muted">در حال دریافت حساب...</p>}
+ {!token?<section className="p2-card p2-empty"><UserRound size={30}/><h2>برای مشاهده حساب وارد شو</h2><Link className="p2-btn" href="/v11">ورود / ثبت‌نام</Link></section>:<>
+ <div className="p2-grid p2-grid-2"><section className="p2-card"><div className="p2-card-title"><UserRound size={16}/> اطلاعات حساب</div><div className="p2-profile"><div className="p2-avatar">{user?.email?.slice(0,1).toUpperCase()||"T"}</div><div><b>{user?.email||"در حال بارگذاری..."}</b><small>شناسه کاربر: {user?.id||"—"}</small></div></div><div className="p2-metric"><span>نوع احراز هویت</span><b>Bearer Session</b></div><div className="p2-metric"><span>محیط معاملات</span><b className="p2-green">Paper Only</b></div><button className="p2-btn p2-btn-danger" onClick={logout}><LogOut size={15}/> خروج از حساب</button></section>
+ <section className="p2-card"><div className="p2-card-title"><ShieldCheck size={16}/> امنیت</div><div className="p2-note"><ShieldCheck size={17}/> رمز عبور به‌صورت متن ساده در این صفحه نمایش داده نمی‌شود. نشست کاربر با توکن Bearer مدیریت می‌شود.</div><div className="p2-metric"><span>اجرای زنده صرافی</span><b className="p2-red">غیرفعال</b></div><div className="p2-metric"><span>تفکیک اطلاعات کاربران</span><b className="p2-green">فعال در API V11</b></div></section></div>
+ <section className="p2-card"><div className="p2-card-title"><CreditCard size={16}/> اشتراک و پرداخت</div><div className="p2-plan"><div><span className="p2-eyebrow">CURRENT ACCESS</span><h2>Research / Paper Workspace</h2><p className="p2-muted">دسترسی فعلی بر اساس قابلیت‌های موجود پروژه است.</p></div><span className="p2-plan-badge">بدون پرداخت</span></div><div className="p2-note"><BadgeCheck size={17}/> سیستم اشتراک پولی، درگاه پرداخت، تمدید خودکار و مدیریت فاکتور هنوز در Backend پیاده‌سازی نشده‌اند؛ بنابراین هیچ پلن یا پرداختی به‌صورت نمایشی فعال نشده است.</div><button className="p2-btn" disabled title="Billing backend not implemented">مدیریت اشتراک — به‌زودی</button></section>
+ </>}</main>;
+}
+function Header(){return <header className="p2-header"><Link href="/">TRADF<span>.</span></Link><nav><Link href="/">داشبورد</Link><Link href="/analytics">سود و زیان</Link><Link href="/strategies">رتبه‌بندی</Link><Link href="/reports">گزارش‌ها</Link><Link href="/v11">Paper Workspace</Link></nav></header>}
