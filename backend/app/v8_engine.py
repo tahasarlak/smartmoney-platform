@@ -275,6 +275,7 @@ async def scan_symbols_v8(
                         "min_rr": min_rr,
                         "allow_counter_trend": allow_counter,
                     },
+                    regimes=regimes,
                 )
 
                 scenarios = []
@@ -363,6 +364,8 @@ async def scan_symbols_v8(
                 })
     opportunities.sort(
         key=lambda item: (
+            bool((item.get("quality_assessment") or {}).get("review_eligible")),
+            int((item.get("quality_assessment") or {}).get("independent_confluence_count", 0)),
             int(item.get("quality_score", 0)),
             item.get("confirmation") == "confirmed_trigger",
         ),
@@ -370,7 +373,8 @@ async def scan_symbols_v8(
     )
 
     return {
-        "engine_version": "smartmoney-intelligence-v8.3",
+        "engine_version": "smartmoney-intelligence-v9.0",
+        "quality_methodology_version": "signal-quality-1.0",
         "market_regime_methodology_version": "market-regime-1.0",
         "scanned_at": datetime.now(timezone.utc).isoformat(),
         "requested_symbols": normalized,

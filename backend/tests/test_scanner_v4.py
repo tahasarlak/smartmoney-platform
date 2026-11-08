@@ -20,6 +20,9 @@ def test_scanner_returns_both_directions_and_never_fakes_probability():
     assert len(result["scenarios"]) == 2
     assert result["estimated_win_probability"] is None
     assert result["execution_allowed"] is False
+    assert all("quality_assessment" in item for item in result["scenarios"])
+    assert all(item["quality_assessment"]["estimated_win_probability"] is None
+               for item in result["scenarios"])
 
 def test_scanner_can_surface_countertrend_zone_as_watchlist():
     candles={tf:series(interval={"4h":14400,"1h":3600,"15m":900,"5m":300,"1m":60}[tf])

@@ -147,6 +147,8 @@ def test_scan_v8_returns_symbol_results_without_fake_probability():
     assert result["results"][0]["market_regime"]["4h"]["closed_candle_only"] is True
     assert result["results"][0]["scenarios"][0]["regime_context"]["entry_timeframe"]["timeframe"] == "5m"
     assert result["summary"]["expanded_volatility_symbols"] >= 0
+    assert result["quality_methodology_version"] == "signal-quality-1.0"
+    assert all("quality_assessment" in item for item in result["results"][0]["scenarios"])
     assert result["estimated_win_probability"] is None
     assert result["execution_allowed"] is False
 

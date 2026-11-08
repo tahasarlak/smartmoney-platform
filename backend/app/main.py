@@ -238,6 +238,11 @@ async def scan_binance_symbol(payload: OHLCVRequest):
             for tf in TIMEFRAMES
         }
 
+        regimes = {
+            tf: analyze_market_regime(candles_by_tf[tf], tf)
+            for tf in TIMEFRAMES
+        }
+
         result = scan_symbol(
             payload.symbol,
             candles_by_tf,
@@ -246,12 +251,14 @@ async def scan_binance_symbol(payload: OHLCVRequest):
                 "min_quality_score": _current_settings.min_quality_score,
                 "min_rr": _current_settings.min_rr,
                 "allow_counter_trend": _current_settings.allow_counter_trend
-            }
+            },
+            regimes=regimes,
         )
 
         return {
             "provider": "Binance public market data",
             "data_quality": data_checks,
+            "market_regime": regimes,
             "settings": {
                 "min_quality_score": _current_settings.min_quality_score,
                 "min_rr": _current_settings.min_rr,

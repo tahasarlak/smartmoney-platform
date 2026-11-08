@@ -1,6 +1,8 @@
 from __future__ import annotations
 from typing import Any
 
+from .quality_engine import assess_signal_quality
+
 TIMEFRAMES = ("4h", "1h", "15m", "5m", "1m")
 
 def _closed_last(candles: list[dict[str, Any]]) -> dict[str, Any]:
@@ -63,7 +65,8 @@ def _zones(analysis: dict[str, Any], direction: str) -> list[dict]:
     return [z for z in analysis.get("zones", []) if z.get("direction") == direction]
 
 def scan_symbol(symbol: str, candles_by_tf: dict[str, list[dict[str, Any]]],
-                analyses: dict[str, dict[str, Any]], settings: dict[str, Any] | None = None) -> dict[str, Any]:
+                analyses: dict[str, dict[str, Any]], settings: dict[str, Any] | None = None,
+                regimes: dict[str, dict[str, Any]] | None = None) -> dict[str, Any]:
     """Create watchlist scenarios, not trade orders or fabricated win probabilities."""
     settings = settings or {}
     min_quality = int(settings.get("min_quality_score", 50))
@@ -191,6 +194,17 @@ def scan_symbol(symbol: str, candles_by_tf: dict[str, list[dict[str, Any]]],
                 if (sweep or bos or choch or one_minute_shift)
                 else "zone_waiting"
             )
+            quality = assess_signal_quality(
+                direction=direction,
+                technical_score=score,
+                analyses=analyses,
+                regimes=regimes,
+                zone_valid=True,
+                confirmation=confirmation,
+                counter_trend=counter,
+                min_quality_score=min_quality,
+            )
+            score = quality["quality_score"]
             state = "watchlist" if score < min_quality else confirmation
             if confirmation == "confirmed_trigger" and score >= min_quality:
                 state = "candidate_ready_for_risk_validation"
@@ -203,13 +217,26 @@ def scan_symbol(symbol: str, candles_by_tf: dict[str, list[dict[str, Any]]],
                          "status": zone.get("status")},
                 "current_price": current, "reasons": reasons,
                 "confirmation": confirmation,
+                "quality_assessment": quality,
                 "minimum_rr_requested": min_rr,
                 "estimated_win_probability": None
             })
         else:
+            quality = assess_signal_quality(
+                direction=direction,
+                technical_score=score,
+                analyses=analyses,
+                regimes=regimes,
+                zone_valid=False,
+                confirmation="no_valid_5m_entry_zone",
+                counter_trend=counter,
+                min_quality_score=min_quality,
+            )
+            score = quality["quality_score"]
             scenarios.append({
                 "direction": direction, "state": "watchlist" if score >= min_quality else "monitoring",
                 "quality_score": score, "score_breakdown": score_breakdown,
+                "quality_assessment": quality,
                 "setup_class": "counter_trend" if counter else context,
                 "zone": None, "current_price": current, "reasons": reasons,
                 "confirmation": "no_valid_5m_entry_zone",
@@ -225,6 +252,7 @@ def scan_symbol(symbol: str, candles_by_tf: dict[str, list[dict[str, Any]]],
         "estimated_win_probability": None,
         "probability_status": "requires_out_of_sample_backtest_and_calibration",
         "execution_allowed": False,
-        "engine_version": "trade-intelligence-4.1",
+        "engine_version": "trade-intelligence-5.0",
+        "quality_methodology_version": "signal-quality-1.0",
         "note": "Scanner output is research/watchlist classification only. It does not place orders."
     }
