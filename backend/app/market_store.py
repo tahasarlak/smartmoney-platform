@@ -1,5 +1,6 @@
 """Shared market prices and shared market watchlist backed by PostgreSQL."""
 from __future__ import annotations
+import math
 from datetime import datetime, timezone
 from typing import Any
 from sqlalchemy import select

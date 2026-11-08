@@ -1,4 +1,5 @@
 import uuid
+import pytest
 
 from app.database import session_scope
 from app.db_models import MarketPrice
