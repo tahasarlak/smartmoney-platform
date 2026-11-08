@@ -2017,3 +2017,137 @@ def api_phase25_reliability(portfolio_id: str, limit: int = 500, user=Depends(cu
 
 # ===== END TRADF PHASES 21-25 =====
 
+
+
+# ===== TRADF PHASES 26-30: paper lifecycle, position guidance and release validation =====
+import asyncio as _phase2630_asyncio
+from pydantic import BaseModel as _Phase2630BaseModel, Field as _Phase2630Field
+from .phase26_paper_lifecycle import build_lifecycle_validation as _phase26_lifecycle
+from .phase27_position_management import build_position_guidance as _phase27_guidance
+from .phase28_market_intelligence import build_market_intelligence as _phase28_intelligence
+from .phase29_strategy_governance import rank_strategy_candidates as _phase29_governance
+from .phase30_release_validation import build_release_validation as _phase30_release
+from .market_data import binance_klines as _phase28_klines
+
+class _Phase27GuidanceRequest(_Phase2630BaseModel):
+    prices_by_trade_id: dict[str, float] = _Phase2630Field(default_factory=dict)
+    near_level_pct: float = _Phase2630Field(default=0.5, gt=0, le=10)
+
+class _Phase29GovernanceRequest(_Phase2630BaseModel):
+    strategies: list[dict[str, Any]]
+    market_regime: str = "unknown"
+    max_recommended: int = _Phase2630Field(default=5, ge=1, le=20)
+    min_sample_size: int = _Phase2630Field(default=30, ge=5, le=10000)
+
+def _phase2630_context(user_id: str, portfolio_id: str, limit: int = 500):
+    portfolio, trades, events_by_trade = _phase2125_context(user_id, portfolio_id, limit)
+    return portfolio, trades, events_by_trade
+
+@router.get("/portfolios/{portfolio_id}/lifecycle-validation")
+def api_phase26_lifecycle_validation(portfolio_id: str, limit: int = 500,
+                                     user=Depends(current_user)):
+    if not 1 <= limit <= 500:
+        raise HTTPException(status_code=422, detail="limit must be between 1 and 500")
+    try:
+        portfolio, trades, events = _phase2630_context(user["id"], portfolio_id, limit)
+        result = _phase26_lifecycle(trades=trades, events_by_trade=events)
+        result.update({"portfolio_id": portfolio_id, "portfolio_name": portfolio["name"],
+                       "trades_returned": len(trades), "truncated": len(trades) >= limit})
+        return result
+    except LookupError as exc:
+        raise HTTPException(status_code=404, detail=str(exc))
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc))
+
+@router.post("/portfolios/{portfolio_id}/position-guidance")
+def api_phase27_position_guidance(portfolio_id: str, payload: _Phase27GuidanceRequest,
+                                  limit: int = 500, user=Depends(current_user)):
+    if not 1 <= limit <= 500:
+        raise HTTPException(status_code=422, detail="limit must be between 1 and 500")
+    try:
+        portfolio = get_portfolio(user["id"], portfolio_id)
+        trades = list_execution_trades(user["id"], portfolio_id, status=None, limit=limit)
+        result = _phase27_guidance(trades=trades,
+                                   prices_by_trade_id=payload.prices_by_trade_id,
+                                   near_level_pct=payload.near_level_pct)
+        result.update({"portfolio_id": portfolio_id, "portfolio_name": portfolio["name"]})
+        return result
+    except LookupError as exc:
+        raise HTTPException(status_code=404, detail=str(exc))
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc))
+
+@router.get("/market-intelligence/{symbol}")
+async def api_phase28_market_intelligence(
+    symbol: str, timeframes: str = "4h,1h,15m,5m", limit: int = 300,
+    user=Depends(current_user),
+):
+    if not 32 <= limit <= 1000:
+        raise HTTPException(status_code=422, detail="limit must be between 32 and 1000")
+    requested = [item.strip() for item in timeframes.split(",") if item.strip()]
+    allowed = {"4h", "1h", "15m", "5m", "1m"}
+    if not requested or len(requested) > 5 or len(set(requested)) != len(requested) or not set(requested).issubset(allowed):
+        raise HTTPException(status_code=422, detail="timeframes must be unique values from 4h,1h,15m,5m,1m")
+    try:
+        rows = await _phase2630_asyncio.gather(
+            *(_phase28_klines(symbol, timeframe, limit) for timeframe in requested)
+        )
+        candles = dict(zip(requested, rows))
+        result = _phase28_intelligence(symbol=symbol, candles_by_timeframe=candles)
+        result["provider"] = "Binance public market data"
+        result["execution_allowed"] = False
+        return result
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc))
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail=f"Market intelligence unavailable: {exc}")
+
+@router.post("/research/strategy-governance")
+def api_phase29_strategy_governance(payload: _Phase29GovernanceRequest,
+                                    user=Depends(current_user)):
+    try:
+        return _phase29_governance(
+            strategies=payload.strategies, market_regime=payload.market_regime,
+            max_recommended=payload.max_recommended, min_sample_size=payload.min_sample_size,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc))
+
+@router.get("/portfolios/{portfolio_id}/release-validation")
+def api_phase30_release_validation(portfolio_id: str, limit: int = 500,
+                                   user=Depends(current_user)):
+    if not 1 <= limit <= 500:
+        raise HTTPException(status_code=422, detail="limit must be between 1 and 500")
+    database_ok = False
+    try:
+        portfolio, trades, events = _phase2630_context(user["id"], portfolio_id, limit)
+        db = _session()
+        try:
+            db.execute(select(1))
+            database_ok = True
+        finally:
+            db.close()
+        lifecycle = _phase26_lifecycle(trades=trades, events_by_trade=events)
+        result = _phase30_release(
+            database_probe_ok=database_ok,
+            lifecycle_report=lifecycle,
+            paper_only=True,
+            required_features={
+                "phase21_paper_control": True,
+                "phase22_execution_preflight": True,
+                "phase23_adaptive_risk_advisory": True,
+                "phase24_market_alerts": True,
+                "phase25_scoped_reliability": True,
+            },
+        )
+        result.update({"portfolio_id": portfolio_id, "portfolio_name": portfolio["name"],
+                       "trades_returned": len(trades), "truncated": len(trades) >= limit,
+                       "lifecycle": lifecycle})
+        return result
+    except LookupError as exc:
+        raise HTTPException(status_code=404, detail=str(exc))
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc))
+
+# ===== END TRADF PHASES 26-30 =====
+
