@@ -38,15 +38,20 @@ from .signal_schemas import SignalPriceUpdate
 from .live_price_monitor import live_price_monitor
 from .v8_engine import V8ScanRequest, V8StartRequest, V8IntelligenceService
 from .v11_platform import router as v11_router
+from .live_strategy_router import router as live_strategy_router
+from .live_signal_monitor import live_signal_monitor
+from .paper_automation_router import router as paper_automation_router
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     # Alembic owns schema creation. Application startup only starts runtime services.
     await live_price_monitor.start()
+    await live_signal_monitor.start()
     try:
         yield
     finally:
+        await live_signal_monitor.stop()
         await live_price_monitor.stop()
 
 
@@ -59,6 +64,8 @@ app = FastAPI(
 app.add_middleware(CORSMiddleware, allow_origins=settings.api_cors_origins.split(","),
                    allow_credentials=True, allow_methods=["*"], allow_headers=["*"])
 app.include_router(v11_router)
+app.include_router(live_strategy_router)
+app.include_router(paper_automation_router)
 _current_settings = SettingsIn()
 
 v8_service = V8IntelligenceService(
@@ -665,5 +672,6 @@ async def v8_start(payload: V8StartRequest):
 @app.post("/api/v1/intelligence/v8/stop")
 async def v8_stop():
     return await v8_service.stop()
+
 
 

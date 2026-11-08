@@ -8,7 +8,7 @@ from __future__ import annotations
 import math, uuid
 from datetime import datetime, timezone
 from typing import Any
-from sqlalchemy import select, and_, or_
+from sqlalchemy import select, and_, or_, text
 from .database import session_scope, get_session_factory
 from .db_models import Signal, SignalEvent
 
@@ -43,13 +43,21 @@ def _row(row):
     return item
 
 def create_signal(plan: dict[str, Any], user_id: str | None = None,
-                  visibility: str = "public") -> dict[str, Any]:
+                  visibility: str = "public", *, source: str = "research",
+                  idempotency_key: str | None = None) -> dict[str, Any]:
     if plan.get("status") not in ("pending_retest", "zone_active"):
         raise ValueError("Only a valid pending_retest or zone_active plan can be journaled")
     if plan.get("execution_allowed") is not False:
         raise ValueError("Research signal must not enable execution")
     if visibility not in ("public", "private"):
         raise ValueError("visibility must be public or private")
+    source = str(source).strip()
+    if not source or len(source) > 40:
+        raise ValueError("source must contain 1..40 characters")
+    if idempotency_key is not None:
+        idempotency_key = str(idempotency_key).strip()
+        if not idempotency_key or len(idempotency_key) > 40:
+            raise ValueError("idempotency_key must contain 1..40 characters")
     if visibility == "private" and not user_id:
         raise ValueError("Private signals require an authenticated user_id")
     if visibility == "public": user_id = None
@@ -65,6 +73,22 @@ def create_signal(plan: dict[str, Any], user_id: str | None = None,
         raise ValueError("Invalid bearish price ordering")
     now, sid, zone = _now(), str(uuid.uuid4()), plan.get("zone") or {}
     with session_scope() as db:
+        if idempotency_key is not None:
+            # Serialize identical live-signal inserts across workers/processes.
+            # This uses PostgreSQL transaction-scoped advisory locks and is safe
+            # with the transaction-pooling database configuration.
+            db.execute(
+                text("SELECT pg_advisory_xact_lock(hashtextextended(:key, 0))"),
+                {"key": idempotency_key},
+            )
+            existing = db.scalar(select(Signal).where(
+                Signal.source == source,
+                Signal.symbol == str(plan["symbol"]).upper(),
+            ))
+            if existing is not None:
+                result = _row(existing)
+                result["deduplicated"] = True
+                return result
         row = Signal(id=sid, user_id=user_id, visibility=visibility,
             symbol=str(plan["symbol"]).upper(), direction=direction,
             status="WAITING_ENTRY", setup_class=plan.get("setup_class"),
@@ -73,13 +97,17 @@ def create_signal(plan: dict[str, Any], user_id: str | None = None,
             zone_low=zone.get("low"), zone_high=zone.get("high"),
             min_rr=plan.get("minimum_rr_requested"),
             risk_percent=plan.get("risk_percent_setting"), created_at=now,
-            updated_at=now, last_price=plan.get("current_price"), source="research")
+            updated_at=now, last_price=plan.get("current_price"), source=source)
         db.add(row)
         db.add(SignalEvent(signal_id=sid, event_type="SIGNAL_CREATED",
             new_status="WAITING_ENTRY", price=plan.get("current_price"),
-            note="Research-only plan saved; no broker order sent.", created_at=now))
+            note=("Live SMC research signal saved; no broker order sent."
+                  if source.startswith("live_smc_")
+                  else "Research-only plan saved; no broker order sent."), created_at=now))
         db.flush()
-        return _row(row)
+        result = _row(row)
+        result["deduplicated"] = False
+        return result
 
 def _visibility_filter(user_id: str | None):
     if user_id:
