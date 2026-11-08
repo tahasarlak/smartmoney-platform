@@ -1661,3 +1661,34 @@ def api_portfolio_statistical_validation(
         raise HTTPException(status_code=404, detail=str(exc))
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc))
+
+
+from .walk_forward_validation import build_walk_forward_validation
+
+
+@router.get("/portfolios/{portfolio_id}/walk-forward")
+def api_portfolio_walk_forward_validation(
+    portfolio_id: str,
+    limit: int = 500,
+    folds: int = 4,
+    min_train_fraction: float = 0.5,
+    user=Depends(current_user),
+):
+    """Chronological holdout diagnostics for closed paper execution outcomes."""
+    if not 1 <= limit <= 500:
+        raise HTTPException(status_code=422, detail="limit must be between 1 and 500")
+    try:
+        portfolio = get_portfolio(user["id"], portfolio_id)
+        trades = list_execution_trades(user["id"], portfolio_id, status=None, limit=limit)
+        result = build_walk_forward_validation(
+            trades=trades, folds=folds, min_train_fraction=min_train_fraction
+        )
+        result["portfolio_id"] = portfolio_id
+        result["portfolio_name"] = portfolio["name"]
+        result["trades_returned"] = len(trades)
+        result["truncated"] = len(trades) >= limit
+        return result
+    except LookupError as exc:
+        raise HTTPException(status_code=404, detail=str(exc))
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc))
