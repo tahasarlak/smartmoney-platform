@@ -2,7 +2,7 @@ SMARTMONEY LIVE PRICE MONITOR 7.0
 
 Prerequisite:
 - Signal Journal 6.0 must already be installed and its imports/endpoints integrated.
-- The v6 backend/app/signal_journal.py module and SQLite DB must exist.
+- The v6 backend/app/signal_journal.py module and PostgreSQL schema (managed by Alembic) must exist.
 
 Files:
 - backend/app/live_price_monitor.py
@@ -22,7 +22,7 @@ Monitor:
 - Refreshes subscriptions every 30 seconds.
 - Reconnects after disconnects.
 - Updates v6 journal from actual trade ticks.
-- On process restart, active signals are read back from SQLite and subscriptions resume.
+- On process restart, active signals and watchlist entries are read back from PostgreSQL and subscriptions resume.
 - This is a market-price monitor, not an order executor.
 - It uses last trade price. It does not guarantee fill price or exchange execution.
 - Candle high/low ambiguity is avoided because each update is a sequenced trade tick.

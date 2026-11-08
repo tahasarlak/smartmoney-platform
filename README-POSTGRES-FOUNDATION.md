@@ -1,30 +1,38 @@
-# SmartMoney V11 PostgreSQL foundation
+# SmartMoney V11 PostgreSQL foundation — Phase 2
 
-This is the first, deliberately limited PostgreSQL/Alembic foundation.
+## Storage architecture
+- Neon PostgreSQL is the shared persistent database for V11 users, sessions, portfolios, paper accounts, paper orders, audit events and shared-backtest history.
+- Market prices and market watchlist are stored in PostgreSQL.
+- Signals and signal events are stored in PostgreSQL. Public signals have no owner; private signals require an existing V11 user.
+- SQLite is not used by these Phase 2 repositories.
+- Alembic owns schema creation and upgrades. Application startup does not create or drop tables.
+- `DATABASE_URL` is used by the application (prefer Neon pooled endpoint).
+- `DIRECT_URL` is used by Alembic migrations and schema maintenance (Neon direct endpoint).
+- Psycopg server-side prepared statements are disabled for PgBouncer transaction-pool compatibility.
 
-## Decisions implemented
-- Shared market prices and shared market watchlist.
-- Signals support `public` and `private` visibility. Public signals have no owner; private signals require `user_id`.
-- Clean initialization only: no SQLite data is imported.
-- Paper-only broker accounts (`binance`, `mt5`).
+## GitHub configuration
+In GitHub → Settings → Environments → `development` configure:
+- `DATABASE_URL`: Neon pooled PostgreSQL connection string.
+- `DIRECT_URL`: Neon direct PostgreSQL connection string.
 
-## Install
-From `backend`:
-```bash
-python -m pip install -r requirements-postgres.txt
-```
+Both secrets must point to the same Neon database.
 
-## GitHub
-Copy `.github/workflows/neon-initialize-schema.yml` into the repository.
-Copy the contents of `backend/` into the repository's `backend/`.
+## Initialize or reset
+The workflow `.github/workflows/smartmoney-postgres-tests.yml` runs migrations and the full backend test suite on pushes to `main`.
 
-Configure GitHub Environment `development` secret:
-- `DIRECT_URL`: Neon direct (non-pooled) connection string for the development branch.
+For a clean first initialization, run the workflow manually:
+1. Set `reset_public_schema` to `true`.
+2. Enter `RESET_PUBLIC_SCHEMA` in `reset_confirmation`.
+3. Run the workflow.
 
-Run `SmartMoney V11 - Initialize Neon Schema` manually and enter:
-`INITIALIZE_DEVELOPMENT`
+This operation drops and recreates the entire `public` schema. All objects and data in that schema are permanently deleted. Do not use it after production data is stored.
 
-The workflow refuses to run if application tables already exist in `public`. It creates tables only; it does not migrate the current application modules from SQLite.
+For normal future deployments, run the workflow with `reset_public_schema=false`; Alembic applies pending migrations without deleting data.
 
-## Important next step
-The existing `market_store.py`, `signal_journal.py`, and `v11_platform.py` still use SQLite in the current source snapshot. Do not deploy this foundation as a completed PostgreSQL application. Next work must port those repositories/services to SQLAlchemy, add user ownership enforcement for private signals, and run the backend test suite against PostgreSQL.
+## Verification
+The workflow validates both Neon connections, imports and syntax, applies Alembic migrations, runs every test under `backend/tests`, and verifies the expected tables and Alembic revision.
+
+## Boundaries
+- Broker accounts remain paper-only. Live execution remains disabled.
+- MT5 terminal/EA bridge and Binance authenticated order adapter are not connected.
+- This phase completes the PostgreSQL storage and migration foundation; it does not claim MFA, email verification, password reset, rate limiting, managed secrets, production backup/restore drills, or load/security certification.

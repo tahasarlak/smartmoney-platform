@@ -98,7 +98,11 @@ def register_user(email: str, password: str) -> dict[str, Any]:
             max_open_trades=3, max_portfolio_risk_pct=3.0,
             max_trade_risk_pct=1.0, created_at=now,
         )
-        db.add_all([user, portfolio])
+        # Flush the parent row before the portfolio so PostgreSQL can
+        # satisfy the portfolio.user_id foreign key deterministically.
+        db.add(user)
+        db.flush()
+        db.add(portfolio)
         db.flush()
         _audit(db, user_id, "USER_REGISTERED", portfolio_id, None, {})
         db.commit()

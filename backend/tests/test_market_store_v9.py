@@ -98,3 +98,16 @@ def test_live_monitor_restores_watchlist_after_reconstruction():
 
     finally:
         cleanup_symbol(symbol)
+
+
+def test_market_price_rejects_non_finite_values():
+    symbol = unique_symbol()
+    base = {
+        "symbol": symbol,
+        "event_time": "2026-01-01T00:00:00+00:00",
+        "event_time_ms": 1767225600000,
+    }
+
+    for value in (float("nan"), float("inf"), float("-inf"), 0, -1):
+        with pytest.raises(ValueError):
+            upsert_market_price({**base, "price": value})

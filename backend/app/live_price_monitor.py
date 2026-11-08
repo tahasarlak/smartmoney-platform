@@ -23,7 +23,7 @@ def active_symbols() -> list[str]:
             try: symbols.add(normalize_symbol(item).lower())
             except ValueError: log.warning("Ignoring invalid monitor symbol: %r", item)
     for status in ACTIVE_STATUSES:
-        for signal in list_signals(status=status, limit=500):
+        for signal in list_signals(status=status, limit=500, include_private=True):
             raw = str(signal.get("symbol", "")).strip()
             if raw:
                 try: symbols.add(normalize_symbol(raw).lower())
@@ -55,8 +55,8 @@ def parse_trade_message(raw: str | bytes) -> dict[str, Any] | None:
 def apply_trade_event(event: dict[str, Any]) -> int:
     changed = 0
     for status in ACTIVE_STATUSES:
-        for signal in list_signals(status=status, symbol=event["symbol"], limit=500):
-            if update_signal_price(signal["id"], event["price"], event["event_time"]):
+        for signal in list_signals(status=status, symbol=event["symbol"], limit=500, include_private=True):
+            if update_signal_price(signal["id"], event["price"], event["event_time"], include_private=True):
                 changed += 1
     return changed
 

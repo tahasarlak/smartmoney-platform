@@ -8,24 +8,34 @@ from app import v11_platform as v11
 
 
 @pytest.fixture(autouse=True)
-def isolated_db():
-    from sqlalchemy import text
+def cleanup_test_users(monkeypatch):
+    """Keep tests isolated without truncating the shared Neon database."""
+    from sqlalchemy import delete
     from app.database import session_scope
+    from app.db_models import User
 
-    with session_scope() as db:
-        db.execute(text("""
-            TRUNCATE TABLE
-                v11_audit_events,
-                v11_paper_orders,
-                v11_broker_accounts,
-                v11_sessions,
-                v11_backtest_runs,
-                v11_portfolios,
-                v11_users
-            RESTART IDENTITY CASCADE
-        """))
+    created_user_ids = []
+    original_register = v11.register_user
 
-def make_user(email="alice@example.com"):
+    def tracked_register(*args, **kwargs):
+        result = original_register(*args, **kwargs)
+        created_user_ids.append(result["id"])
+        return result
+
+    monkeypatch.setattr(v11, "register_user", tracked_register)
+    yield
+
+    if created_user_ids:
+        with session_scope() as db:
+            db.execute(delete(User).where(User.id.in_(created_user_ids)))
+
+
+def make_user(email=None):
+    email = email or f"alice-{uuid.uuid4().hex[:12]}@example.com"
+    # Make explicit fixture addresses unique too, so reruns never collide.
+    if email in ("alice@example.com", "bob@example.com"):
+        local, domain = email.split("@", 1)
+        email = f"{local}-{uuid.uuid4().hex[:8]}@{domain}"
     return v11.register_user(email, "correct-horse-battery")
 
 

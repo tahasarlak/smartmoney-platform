@@ -29,7 +29,13 @@ def get_engine():
     if url.get_backend_name() == "postgresql":
         kwargs.update(pool_size=int(os.getenv("DB_POOL_SIZE", "5")),
                       max_overflow=int(os.getenv("DB_MAX_OVERFLOW", "5")),
-                      connect_args={"connect_timeout": 15, "sslmode": "require"})
+                      connect_args={
+                          "connect_timeout": 15,
+                          "sslmode": "require",
+                          # Neon pooled endpoints use PgBouncer transaction pooling.
+                          # Disable server-side prepared statements for compatibility.
+                          "prepare_threshold": None,
+                      })
     return create_engine(url, **kwargs)
 
 @lru_cache(maxsize=1)

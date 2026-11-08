@@ -42,8 +42,8 @@ def upsert_market_price(event: dict[str, Any], provider: str = "binance_spot") -
     price = float(event["price"])
     event_time = str(event["event_time"])
     event_time_ms = int(event["event_time_ms"])
-    if not symbol or price <= 0:
-        raise ValueError("symbol and positive price are required")
+    if not symbol or not math.isfinite(price) or price <= 0 or event_time_ms < 0:
+        raise ValueError("symbol, finite positive price and non-negative event_time_ms are required")
     with session_scope() as db:
         stmt = pg_insert(MarketPrice).values(symbol=symbol, price=price,
             event_time=event_time, event_time_ms=event_time_ms,

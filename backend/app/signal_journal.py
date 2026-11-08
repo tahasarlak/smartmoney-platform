@@ -81,9 +81,15 @@ def get_signal(signal_id: str, user_id: str | None = None):
         return _row(row)
 
 def list_signals(status: str | None = None, symbol: str | None = None,
-                 limit: int = 100, user_id: str | None = None):
+                 limit: int = 100, user_id: str | None = None,
+                 include_private: bool = False):
     if not 1 <= int(limit) <= 500: raise ValueError("limit must be 1..500")
-    stmt = select(Signal).where(_visibility_filter(user_id))
+    # include_private is reserved for trusted internal services (e.g. the
+    # market monitor), never expose it directly as an unauthenticated API flag.
+    visibility_clause = None if include_private else _visibility_filter(user_id)
+    stmt = select(Signal)
+    if visibility_clause is not None:
+        stmt = stmt.where(visibility_clause)
     if status: stmt = stmt.where(Signal.status == status.upper())
     if symbol: stmt = stmt.where(Signal.symbol == symbol.upper())
     stmt = stmt.order_by(Signal.created_at.desc()).limit(int(limit))
@@ -98,13 +104,15 @@ def signal_events(signal_id: str, user_id: str | None = None):
         return [{c.name: getattr(r, c.name) for c in r.__table__.columns} for r in rows]
 
 def update_signal_price(signal_id: str, price: float, timestamp: str | None = None,
-                        user_id: str | None = None):
+                        user_id: str | None = None, include_private: bool = False):
     price = float(price)
     if not math.isfinite(price) or price <= 0: raise ValueError("Price must be a finite positive number")
     now_text = timestamp or _now().isoformat()
     with session_scope() as db:
-        row = db.scalar(select(Signal).where(Signal.id == signal_id,
-            _visibility_filter(user_id)).with_for_update())
+        stmt = select(Signal).where(Signal.id == signal_id)
+        if not include_private:
+            stmt = stmt.where(_visibility_filter(user_id))
+        row = db.scalar(stmt.with_for_update())
         if row is None: return None
         old, new, reason = row.status, row.status, None
         if old in ("WAITING_ENTRY", "OPEN", "TP1_HIT", "TP2_HIT"):

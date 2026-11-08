@@ -2,31 +2,40 @@ import uuid
 import pytest
 
 from app import signal_journal as journal
+from app import v11_platform as v11
 
 from sqlalchemy import delete
 from app.database import session_scope
-from app.db_models import Signal
+from app.db_models import Signal, User
 
 
 @pytest.fixture(autouse=True)
-def cleanup_test_signals(monkeypatch):
-    created_ids = []
+def cleanup_test_signals_and_users(monkeypatch):
+    created_signal_ids = []
+    created_user_ids = []
     original_create = journal.create_signal
+    original_register = v11.register_user
 
     def tracked_create(*args, **kwargs):
         result = original_create(*args, **kwargs)
-        created_ids.append(result["id"])
+        created_signal_ids.append(result["id"])
+        return result
+
+    def tracked_register(*args, **kwargs):
+        result = original_register(*args, **kwargs)
+        created_user_ids.append(result["id"])
         return result
 
     monkeypatch.setattr(journal, "create_signal", tracked_create)
+    monkeypatch.setattr(v11, "register_user", tracked_register)
 
     yield
 
-    if created_ids:
-        with session_scope() as db:
-            db.execute(
-                delete(Signal).where(Signal.id.in_(created_ids))
-            )
+    with session_scope() as db:
+        if created_signal_ids:
+            db.execute(delete(Signal).where(Signal.id.in_(created_signal_ids)))
+        if created_user_ids:
+            db.execute(delete(User).where(User.id.in_(created_user_ids)))
 
 
 
@@ -149,7 +158,10 @@ def test_private_signal_requires_owner():
 
 
 def test_private_signal_is_not_visible_to_other_users():
-    owner = "test-owner-" + uuid.uuid4().hex
+    owner = v11.register_user(
+        f"private-owner-{uuid.uuid4().hex[:12]}@example.com",
+        "correct-horse-battery",
+    )["id"]
 
     saved = journal.create_signal(
         plan(),
@@ -158,5 +170,18 @@ def test_private_signal_is_not_visible_to_other_users():
     )
 
     assert journal.get_signal(saved["id"], user_id=owner) is not None
-    assert journal.get_signal(saved["id"], user_id="another-user") is None
+    assert journal.get_signal(saved["id"], user_id=str(uuid.uuid4())) is None
     assert journal.get_signal(saved["id"]) is None
+
+
+def test_internal_price_monitor_can_update_private_signal():
+    owner = v11.register_user(
+        f"private-monitor-{uuid.uuid4().hex[:12]}@example.com",
+        "correct-horse-battery",
+    )["id"]
+    saved = journal.create_signal(plan(), user_id=owner, visibility="private")
+
+    assert journal.update_signal_price(
+        saved["id"], 99.5, include_private=True
+    )["status"] == "OPEN"
+    assert journal.get_signal(saved["id"], user_id=owner)["status"] == "OPEN"

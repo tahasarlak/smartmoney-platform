@@ -25,7 +25,7 @@
 - `v11_audit_events`
 - `v11_backtest_runs`
 
-SQLite is used for local V11 persistence. The database path can be overridden with `SMARTMONEY_V11_DB`.
+Neon PostgreSQL is the persistent store for V11 tenant data, shared market prices/watchlist, signals and signal events. The application uses `DATABASE_URL` (prefer the Neon pooled endpoint); Alembic uses `DIRECT_URL` (the Neon direct endpoint). Alembic is the only schema owner. SQLite is not used by the Phase 2 repositories.
 
 ## Remaining work before public multi-user deployment
 
@@ -35,5 +35,6 @@ SQLite is used for local V11 persistence. The database path can be overridden wi
 - Implement a tested MT5 Expert Advisor bridge and Binance demo/testnet order adapter.
 - Add broker symbol metadata, lot/step sizes, contract multipliers, margin, leverage, funding, swaps, spread, slippage and commissions.
 - Add strategy-generated historical signals, walk-forward splits, Monte Carlo and leakage checks.
-- Move all tenant data to PostgreSQL and use Redis only for queues/cache where required.
+- PostgreSQL storage and Alembic migrations are implemented for V11, shared market data, and the signal journal.
+- Redis remains optional infrastructure for queues/cache; it is not a source of truth.
 - Add TLS, reverse proxy, rate limiting, backup/restore drills, monitoring and security/load tests.
