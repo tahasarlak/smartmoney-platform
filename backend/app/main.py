@@ -1,5 +1,6 @@
 from contextlib import asynccontextmanager
 import asyncio
+import re
 
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
@@ -15,6 +16,7 @@ from .trade_setup import build_trade_setup
 from .scanner import scan_symbol
 from .multi_symbol import MultiSymbolScanRequest, scan_many_symbols
 from .data_quality import validate_candle_series
+from .market_regime import analyze_market_regime
 import time
 from .risk import calculate_position_size
 from .execution import create_paper_order
@@ -515,6 +517,57 @@ def calibration_report():
         return report
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc))
+
+
+
+
+@app.get("/api/v1/intelligence/v4/regime/{symbol}")
+async def v4_market_regime(symbol: str, limit: int = 300):
+    """Return closed-candle trend, volatility and participation context."""
+    normalized = symbol.strip().upper()
+    if not re.fullmatch(r"[A-Z0-9]{5,20}", normalized):
+        raise HTTPException(status_code=422, detail="Invalid symbol")
+    if not 100 <= limit <= 1000:
+        raise HTTPException(status_code=422, detail="limit must be between 100 and 1000")
+    try:
+        rows = await asyncio.gather(*[
+            binance_klines(normalized, timeframe, limit)
+            for timeframe in TIMEFRAMES
+        ])
+        candles_by_tf = dict(zip(TIMEFRAMES, rows))
+        now = int(time.time())
+        data_quality = {
+            timeframe: validate_candle_series(candles_by_tf[timeframe], timeframe, now)
+            for timeframe in TIMEFRAMES
+        }
+        invalid = next((tf for tf, check in data_quality.items() if not check["valid"]), None)
+        if invalid:
+            raise HTTPException(
+                status_code=422,
+                detail={
+                    "message": "Market data validation failed",
+                    "timeframe": invalid,
+                    "validation": data_quality[invalid],
+                },
+            )
+        return {
+            "symbol": normalized,
+            "provider": "Binance public market data",
+            "market_regime": {
+                timeframe: analyze_market_regime(candles_by_tf[timeframe], timeframe)
+                for timeframe in TIMEFRAMES
+            },
+            "data_quality": data_quality,
+            "methodology_version": "market-regime-1.0",
+            "estimated_win_probability": None,
+            "execution_allowed": False,
+        }
+    except HTTPException:
+        raise
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc))
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail=f"Market regime analysis failed: {exc}")
 
 
 # V8: Multi-timeframe intelligence scanner and optional research-signal journal.

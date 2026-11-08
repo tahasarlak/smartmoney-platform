@@ -111,24 +111,30 @@ def scan_symbol(symbol: str, candles_by_tf: dict[str, list[dict[str, Any]]],
         if counter and not allow_counter:
             continue
         score = 25
+        score_breakdown = {"base": 25}
         reasons = []
         if primary == direction:
             score += 18
+            score_breakdown["higher_timeframe_alignment"] = 18
             reasons.append(f"Higher-timeframe bias supports {direction}")
         elif counter:
             score -= 8
+            score_breakdown["counter_trend_penalty"] = -8
             reasons.append(f"Counter-trend against {primary} higher-timeframe bias")
         else:
             reasons.append("Higher-timeframe structure is neutral or conflicted")
 
         if analyses["15m"].get("structure") == direction:
             score += 8
+            score_breakdown["15m_structure"] = 8
             reasons.append("15M structure agrees")
         if analyses["5m"].get("structure") == direction:
             score += 8
+            score_breakdown["5m_structure"] = 8
             reasons.append("5M structure agrees")
         if analyses["1m"].get("structure") == direction:
             score += 3
+            score_breakdown["1m_structure"] = 3
             reasons.append("1M structure agrees")
 
         sweep = bool(_events(analyses["15m"], "LIQUIDITY_SWEEP", direction))
@@ -137,21 +143,26 @@ def scan_symbol(symbol: str, candles_by_tf: dict[str, list[dict[str, Any]]],
         one_minute_shift = bool(_events(analyses["1m"], "CHoCH", direction))
         if sweep:
             score += 15
+            score_breakdown["15m_liquidity_sweep"] = 15
             reasons.append("15M liquidity sweep detected")
         if bos:
             score += 15
+            score_breakdown["5m_bos"] = 15
             reasons.append("5M BOS detected")
         if choch:
             score += 12
+            score_breakdown["5m_choch"] = 12
             reasons.append("5M CHoCH detected")
         if one_minute_shift:
             score += 5
+            score_breakdown["1m_choch"] = 5
             reasons.append("1M CHoCH detected")
 
         valid_zones = [z for z in _zones(analyses["5m"], direction)
                        if _valid_zone(z, direction, current, atr, candles_by_tf["5m"])]
         if valid_zones:
             score += 10
+            score_breakdown["valid_5m_retest_zone"] = 10
             reasons.append("Valid 5M unmitigated retest zone found")
         elif _zones(analyses["15m"], direction):
             reasons.append("15M zones exist, but no valid 5M entry zone is confirmed")
@@ -185,6 +196,7 @@ def scan_symbol(symbol: str, candles_by_tf: dict[str, list[dict[str, Any]]],
                 state = "candidate_ready_for_risk_validation"
             scenarios.append({
                 "direction": direction, "state": state, "quality_score": score,
+                "score_breakdown": score_breakdown,
                 "setup_class": "counter_trend" if counter else context,
                 "zone": {"type": zone.get("type"), "low": float(zone["low"]),
                          "high": float(zone["high"]), "formed_at": zone.get("formed_at"),
@@ -197,7 +209,8 @@ def scan_symbol(symbol: str, candles_by_tf: dict[str, list[dict[str, Any]]],
         else:
             scenarios.append({
                 "direction": direction, "state": "watchlist" if score >= min_quality else "monitoring",
-                "quality_score": score, "setup_class": "counter_trend" if counter else context,
+                "quality_score": score, "score_breakdown": score_breakdown,
+                "setup_class": "counter_trend" if counter else context,
                 "zone": None, "current_price": current, "reasons": reasons,
                 "confirmation": "no_valid_5m_entry_zone",
                 "minimum_rr_requested": min_rr,
@@ -212,6 +225,6 @@ def scan_symbol(symbol: str, candles_by_tf: dict[str, list[dict[str, Any]]],
         "estimated_win_probability": None,
         "probability_status": "requires_out_of_sample_backtest_and_calibration",
         "execution_allowed": False,
-        "engine_version": "trade-intelligence-4.0",
+        "engine_version": "trade-intelligence-4.1",
         "note": "Scanner output is research/watchlist classification only. It does not place orders."
     }

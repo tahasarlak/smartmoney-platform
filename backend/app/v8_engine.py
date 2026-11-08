@@ -10,6 +10,7 @@ from pydantic import BaseModel, Field, field_validator
 
 from .data_quality import validate_candle_series
 from .scanner import TIMEFRAMES, scan_symbol
+from .market_regime import analyze_market_regime
 
 _SYMBOL_RE = re.compile(r"^[A-Z0-9]{5,20}$")
 _ACTIVE_SIGNAL_STATUSES = {"WAITING_ENTRY", "OPEN", "TP1_HIT", "TP2_HIT"}
@@ -255,6 +256,12 @@ async def scan_symbols_v8(
                         "data_quality": checks,
                     }
 
+                # Regime classification is computed independently from SMC.
+                # It adds context to the setup without pretending to predict outcomes.
+                regimes = {
+                    timeframe: analyze_market_regime(candles_by_tf[timeframe], timeframe)
+                    for timeframe in TIMEFRAMES
+                }
                 analyses = {
                     timeframe: analyze_smc_fn(symbol, candles_by_tf[timeframe], swing_length=3)
                     for timeframe in TIMEFRAMES
@@ -274,7 +281,24 @@ async def scan_symbols_v8(
                 journaled = []
                 for scenario in scan.get("scenarios", []):
                     plan = _make_plan(symbol, scenario, candles_by_tf, min_rr, risk_percent)
-                    item = {**scenario, "plan": plan}
+                    regime_context = {
+                        "higher_timeframe": regimes["4h"],
+                        "confirmation_timeframe": regimes["15m"],
+                        "entry_timeframe": regimes["5m"],
+                    }
+                    item = {**scenario, "plan": plan, "regime_context": regime_context}
+                    if regimes["4h"]["volatility_regime"] == "expanded":
+                        item.setdefault("risk_context", []).append(
+                            "4H volatility is expanded relative to its recent baseline"
+                        )
+                    if regimes["15m"]["volume_participation"] == "low":
+                        item.setdefault("risk_context", []).append(
+                            "15M volume participation is below its recent baseline"
+                        )
+                    if regimes["4h"]["regime"] == "ranging":
+                        item.setdefault("risk_context", []).append(
+                            "4H market regime is ranging; directional follow-through may be less reliable"
+                        )
                     if plan is None:
                         scenarios.append(item)
                         continue
@@ -310,6 +334,7 @@ async def scan_symbols_v8(
                     "current_price": scan.get("current_price_5m"),
                     "quality_score": max((int(x.get("quality_score", 0)) for x in scenarios), default=0),
                     "scenarios": scenarios,
+                    "market_regime": regimes,
                     "data_quality": checks,
                     "journaled_signal_ids": journaled,
                     "estimated_win_probability": None,
@@ -345,7 +370,8 @@ async def scan_symbols_v8(
     )
 
     return {
-        "engine_version": "smartmoney-intelligence-v8.2",
+        "engine_version": "smartmoney-intelligence-v8.3",
+        "market_regime_methodology_version": "market-regime-1.0",
         "scanned_at": datetime.now(timezone.utc).isoformat(),
         "requested_symbols": normalized,
         "summary": {
@@ -356,12 +382,20 @@ async def scan_symbols_v8(
             "opportunities": len(opportunities),
             "ready_for_review": sum(x.get("signal_state") == "ready_for_review" for x in opportunities),
             "journaled": sum(len(x.get("journaled_signal_ids", [])) for x in scanned),
+            "expanded_volatility_symbols": sum(
+                1 for item in scanned
+                if item.get("market_regime", {}).get("4h", {}).get("volatility_regime") == "expanded"
+            ),
+            "ranging_market_symbols": sum(
+                1 for item in scanned
+                if item.get("market_regime", {}).get("4h", {}).get("regime") == "ranging"
+            ),
         },
         "opportunities": opportunities,
         "results": results,
         "estimated_win_probability": None,
         "execution_allowed": False,
-        "note": "V8.2 is a rule-based research engine. A review-ready setup requires a zone retest, a directional rejection, and BOS/CHoCH on the same closed 5M candle. It does not send broker orders or claim a win probability.",
+        "note": "Rule-based research engine. A review-ready setup requires a zone retest, a directional rejection, and BOS/CHoCH on the same closed 5M candle. Market-regime metrics are contextual filters, not predictive probabilities. No broker orders are sent.",
     }
 
 
