@@ -1756,3 +1756,116 @@ def api_portfolio_research_audit(
         raise HTTPException(status_code=404, detail=str(exc))
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc))
+
+
+
+# ===== TRADF PHASES 16-20: additive research, operations and release routes =====
+# This block is appended once by the installation script. Existing routes remain intact.
+from pydantic import BaseModel as _Phase1520BaseModel, Field as _Phase1520Field
+from .historical_optimizer import optimize_historical_smc as _phase16_optimize
+from .strategy_portfolio_intelligence import allocate_strategy_weights as _phase17_allocate
+from .production_observability import build_operational_report as _phase18_report
+from .security_release_audit import build_security_audit as _phase19_security, build_release_audit as _phase20_release
+from .historical_smc_backtest import run_historical_smc_portfolio_backtest as _phase16_runner
+from .performance_analytics import build_portfolio_performance as _phase10_performance
+from .strategy_validation import build_strategy_validation as _phase11_validation
+from .walk_forward_validation import build_walk_forward_validation as _phase12_walk_forward
+from .research_final_audit import build_research_audit as _phase15_research_audit
+from .database import get_session_factory as _phase18_session_factory
+
+
+class _Phase16OptimizeRequest(_Phase1520BaseModel):
+    candles_by_symbol_and_tf: dict[str, dict[str, list[dict[str, Any]]]]
+    initial_equity: float = 10000.0
+    risk_percent: float = 0.5
+    min_quality_scores: list[int] = _Phase1520Field(default_factory=lambda: [60, 65, 70])
+    min_rr_values: list[float] = _Phase1520Field(default_factory=lambda: [1.5, 2.0, 2.5])
+    train_fraction: float = 0.7
+    max_combinations: int = 24
+    min_train_trades: int = 5
+    spread: float = 0.0
+    slippage: float = 0.0
+    commission_pct: float = 0.0
+
+
+class _Phase17AllocationRequest(_Phase1520BaseModel):
+    strategies: list[dict[str, Any]]
+    correlation: list[list[float]] | None = None
+    max_weight: float = 0.4
+    min_edge: float = 0.0
+
+
+@router.post("/research/historical-optimization")
+def api_phase16_historical_optimization(payload: _Phase16OptimizeRequest, user=Depends(current_user)):
+    """Run bounded parameter selection on OHLC training data and one untouched chronological holdout."""
+    try:
+        result = _phase16_optimize(
+            candles_by_symbol_and_tf=payload.candles_by_symbol_and_tf,
+            runner=_phase16_runner,
+            initial_equity=payload.initial_equity,
+            risk_percent=payload.risk_percent,
+            min_quality_scores=payload.min_quality_scores,
+            min_rr_values=payload.min_rr_values,
+            train_fraction=payload.train_fraction,
+            max_combinations=payload.max_combinations,
+            min_train_trades=payload.min_train_trades,
+            costs={"spread": payload.spread, "slippage": payload.slippage,
+                    "commission_pct": payload.commission_pct},
+        )
+        result["requested_by"] = str(user.get("id"))
+        return result
+    except (ValueError, KeyError, TypeError) as exc:
+        raise HTTPException(status_code=422, detail=str(exc))
+
+
+@router.post("/research/strategy-allocation")
+def api_phase17_strategy_allocation(payload: _Phase17AllocationRequest, user=Depends(current_user)):
+    try:
+        return _phase17_allocate(strategies=payload.strategies, correlation=payload.correlation,
+                                 max_weight=payload.max_weight, min_edge=payload.min_edge)
+    except (ValueError, TypeError) as exc:
+        raise HTTPException(status_code=422, detail=str(exc))
+
+
+@router.get("/operations/monitoring")
+def api_phase18_operational_monitoring(user=Depends(current_user)):
+    return _phase18_report(session_factory=_phase18_session_factory(), live_execution_enabled=False)
+
+
+@router.get("/portfolios/{portfolio_id}/security-audit")
+def api_phase19_security_audit(portfolio_id: str, user=Depends(current_user)):
+    try:
+        portfolio = get_portfolio(user["id"], portfolio_id)
+        return _phase19_security(authenticated_user=user, portfolio=portfolio, live_execution_enabled=False)
+    except LookupError as exc:
+        raise HTTPException(status_code=404, detail=str(exc))
+
+
+@router.get("/portfolios/{portfolio_id}/release-audit")
+def api_phase20_release_audit(portfolio_id: str, limit: int = 500, user=Depends(current_user)):
+    if not 1 <= limit <= 500:
+        raise HTTPException(status_code=422, detail="limit must be between 1 and 500")
+    try:
+        portfolio = get_portfolio(user["id"], portfolio_id)
+        trades = list_execution_trades(user["id"], portfolio_id, status=None, limit=limit)
+        performance = _phase10_performance(initial_equity=float(portfolio["initial_equity"]),
+                                           trades=trades, requested_limit=limit)
+        validation = _phase11_validation(trades=trades, bootstrap_iterations=1000)
+        walk_forward = _phase12_walk_forward(trades=trades, folds=4, min_train_fraction=0.5)
+        research_audit = _phase15_research_audit(trades=trades, portfolio=portfolio)
+        security_audit = _phase19_security(authenticated_user=user, portfolio=portfolio,
+                                           live_execution_enabled=False)
+        operational = _phase18_report(session_factory=_phase18_session_factory(), live_execution_enabled=False)
+        result = _phase20_release(performance=performance, validation=validation,
+                                  walk_forward=walk_forward, research_audit=research_audit,
+                                  security_audit=security_audit, operational_report=operational)
+        result.update({"portfolio_id": portfolio_id, "portfolio_name": portfolio["name"],
+                       "trades_returned": len(trades), "truncated": len(trades) >= limit})
+        return result
+    except LookupError as exc:
+        raise HTTPException(status_code=404, detail=str(exc))
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc))
+
+# ===== END TRADF PHASES 16-20 =====
+
