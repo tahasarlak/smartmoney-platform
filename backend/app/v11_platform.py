@@ -2151,3 +2151,71 @@ def api_phase30_release_validation(portfolio_id: str, limit: int = 500,
 
 # ===== END TRADF PHASES 26-30 =====
 
+
+
+# ===== TRADF PHASE 31: paper-trading burn-in and reconciliation =====
+from .phase31_burn_in import build_burn_in_report as _phase31_build_burn_in
+
+@router.get("/portfolios/{portfolio_id}/burn-in")
+def api_phase31_burn_in(
+    portfolio_id: str,
+    limit: int = 500,
+    window_hours: int = 24,
+    stale_after_seconds: int = 300,
+    minimum_events: int = 5,
+    minimum_observation_minutes: int = 30,
+    user=Depends(current_user),
+):
+    if not 1 <= limit <= 500:
+        raise HTTPException(status_code=422, detail="limit must be between 1 and 500")
+    try:
+        portfolio = get_portfolio(user["id"], portfolio_id)
+        trades = list_execution_trades(user["id"], portfolio_id, status=None, limit=limit)
+        trade_ids = [str(item["id"]) for item in trades]
+        events_by_trade: dict[str, list[dict[str, Any]]] = {trade_id: [] for trade_id in trade_ids}
+        if trade_ids:
+            db = _session()
+            try:
+                rows = db.scalars(
+                    select(ExecutionEvent)
+                    .where(ExecutionEvent.trade_id.in_(trade_ids))
+                    .order_by(ExecutionEvent.event_time_ms.asc(), ExecutionEvent.sequence_no.asc(), ExecutionEvent.id.asc())
+                    .limit(10000)
+                ).all()
+                for row in rows:
+                    events_by_trade[row.trade_id].append({
+                        "id": row.id,
+                        "source_event_id": row.source_event_id,
+                        "sequence_no": row.sequence_no,
+                        "event_type": row.event_type,
+                        "event_time_ms": row.event_time_ms,
+                        "pnl": row.pnl,
+                        "fee": row.fee,
+                        "quantity": row.quantity,
+                    })
+            finally:
+                db.close()
+
+        result = _phase31_build_burn_in(
+            trades=trades,
+            events_by_trade=events_by_trade,
+            now_ms=int(_now().timestamp() * 1000),
+            window_hours=window_hours,
+            stale_after_seconds=stale_after_seconds,
+            minimum_events=minimum_events,
+            minimum_observation_minutes=minimum_observation_minutes,
+        )
+        result.update({
+            "portfolio_id": portfolio_id,
+            "portfolio_name": portfolio["name"],
+            "trades_returned": len(trades),
+            "truncated": len(trades) >= limit,
+        })
+        return result
+    except LookupError as exc:
+        raise HTTPException(status_code=404, detail=str(exc))
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc))
+
+# ===== END TRADF PHASE 31 =====
+
