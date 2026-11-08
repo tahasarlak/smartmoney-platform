@@ -1599,3 +1599,33 @@ def api_execution_events(trade_id: str, limit: int = 200, user=Depends(current_u
         raise HTTPException(status_code=404, detail=str(exc))
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc))
+
+
+from .performance_analytics import build_portfolio_performance
+
+
+@router.get("/portfolios/{portfolio_id}/performance")
+def api_portfolio_performance(
+    portfolio_id: str,
+    limit: int = 500,
+    user=Depends(current_user),
+):
+    """Return realized paper-execution performance analytics for an owned portfolio."""
+    if not 1 <= limit <= 500:
+        raise HTTPException(status_code=422, detail="limit must be between 1 and 500")
+    try:
+        portfolio = get_portfolio(user["id"], portfolio_id)
+        trades = list_execution_trades(user["id"], portfolio_id, status=None, limit=limit)
+        result = build_portfolio_performance(
+            initial_equity=float(portfolio["initial_equity"]),
+            trades=trades,
+            requested_limit=limit,
+        )
+        result["portfolio_id"] = portfolio_id
+        result["portfolio_name"] = portfolio["name"]
+        result["truncated"] = len(trades) >= limit
+        return result
+    except LookupError as exc:
+        raise HTTPException(status_code=404, detail=str(exc))
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc))
