@@ -28,6 +28,11 @@ def active_symbols() -> list[str]:
             if raw:
                 try: symbols.add(normalize_symbol(raw).lower())
                 except ValueError: log.warning("Ignoring invalid signal symbol: %r", raw)
+    try:
+        from .forward_testing import active_forward_symbols
+        symbols.update(normalize_symbol(s).lower() for s in active_forward_symbols())
+    except Exception as exc:
+        log.warning("Could not load active forward-test symbols: %s", exc)
     return sorted(symbols)
 
 def build_stream_url(symbols: list[str]) -> str:
@@ -46,6 +51,7 @@ def parse_trade_message(raw: str | bytes) -> dict[str, Any] | None:
         if not math.isfinite(price) or price <= 0: return None
         return {
             "symbol": symbol, "price": price, "event_time_ms": event_time,
+            "event_id": str(data.get("t")) if data.get("t") is not None else None,
             "event_time": time.strftime("%Y-%m-%dT%H:%M:%S", time.gmtime(event_time / 1000))
                 + f".{event_time % 1000:03d}+00:00",
         }
@@ -79,6 +85,7 @@ class LivePriceMonitor:
         self._last_error: str | None = None
         self._messages_received = 0
         self._signals_updated = 0
+        self._forward_events_processed = 0
         self._connected = False
         self._symbols: list[str] = []
         self._initialized = False
@@ -169,6 +176,7 @@ class LivePriceMonitor:
                 "watchlist_storage": "postgresql",
                 "messages_received": self._messages_received,
                 "signals_updated": self._signals_updated,
+                "forward_events_processed": self._forward_events_processed,
                 "cached_prices": len(self._prices),
                 "last_message_at": self._last_message_at,
                 "last_error": self._last_error, "execution_allowed": False}
@@ -218,6 +226,16 @@ class LivePriceMonitor:
                                 "event_time_ms": event["event_time_ms"],
                                 "updated_at": event["event_time"],
                             }
+                        # Forward paper fills are evaluated before the research signal
+                        # journal can mark the signal terminal on the same market tick.
+                        try:
+                            from .forward_testing import process_forward_tick
+                            self._forward_events_processed += await asyncio.to_thread(
+                                process_forward_tick, event
+                            )
+                        except Exception as exc:
+                            log.exception("Forward-test tick processing failed: %s", exc)
+                            self._last_error = f"Forward testing: {type(exc).__name__}: {exc}"
                         self._signals_updated += await asyncio.to_thread(apply_trade_event, event)
                         if time.monotonic() - last_refresh >= self.refresh_symbols_seconds: break
             except asyncio.CancelledError:

@@ -161,3 +161,88 @@ class SignalEvent(Base):
     price: Mapped[float | None] = mapped_column(Float)
     note: Mapped[str | None] = mapped_column(Text)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
+
+
+class ForwardTestRun(Base):
+    """Tenant-scoped, market-tick-driven paper forward-test session."""
+    __tablename__ = "v11_forward_test_runs"
+    __table_args__ = (
+        CheckConstraint("status IN ('active','stopping','stopped')"),
+        CheckConstraint("initial_equity > 0"),
+        CheckConstraint("risk_per_trade_pct > 0 AND risk_per_trade_pct <= 100"),
+        CheckConstraint("commission_pct >= 0 AND commission_pct <= 5"),
+        CheckConstraint("slippage_bps >= 0 AND slippage_bps <= 1000"),
+        Index("idx_forward_runs_owner_status", "user_id", "status"),
+    )
+    id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    user_id: Mapped[str] = mapped_column(ForeignKey("v11_users.id", ondelete="CASCADE"), nullable=False, index=True)
+    portfolio_id: Mapped[str] = mapped_column(ForeignKey("v11_portfolios.id", ondelete="CASCADE"), nullable=False, index=True)
+    account_id: Mapped[str] = mapped_column(ForeignKey("v11_broker_accounts.id", ondelete="CASCADE"), nullable=False)
+    status: Mapped[str] = mapped_column(String(12), nullable=False, default="active")
+    symbols: Mapped[list] = mapped_column(JSON, nullable=False)
+    initial_equity: Mapped[float] = mapped_column(Float, nullable=False)
+    risk_per_trade_pct: Mapped[float] = mapped_column(Float, nullable=False)
+    min_quality_score: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    commission_pct: Mapped[float] = mapped_column(Float, nullable=False, default=0.04)
+    slippage_bps: Mapped[float] = mapped_column(Float, nullable=False, default=2.0)
+    include_existing_signals: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    started_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    stopped_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    realized_pnl: Mapped[float] = mapped_column(Float, nullable=False, default=0.0)
+    fees_paid: Mapped[float] = mapped_column(Float, nullable=False, default=0.0)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
+
+
+class ForwardTestTrade(Base):
+    """One signal tracked by one forward-test run; targets are partial exits."""
+    __tablename__ = "v11_forward_test_trades"
+    __table_args__ = (
+        UniqueConstraint("run_id", "signal_id", name="uq_forward_trade_run_signal"),
+        CheckConstraint("direction IN ('long','short')"),
+        CheckConstraint("status IN ('pending_entry','open','tp1_hit','tp2_hit','tp3_hit','stopped')"),
+        CheckConstraint("quantity > 0 AND remaining_quantity >= 0"),
+        CheckConstraint("planned_entry > 0 AND stop_loss > 0 AND tp1 > 0 AND tp2 > 0 AND tp3 > 0"),
+        Index("idx_forward_trades_run_status", "run_id", "status"),
+        Index("idx_forward_trades_user_created", "user_id", "created_at"),
+    )
+    id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    run_id: Mapped[str] = mapped_column(ForeignKey("v11_forward_test_runs.id", ondelete="CASCADE"), nullable=False)
+    user_id: Mapped[str] = mapped_column(ForeignKey("v11_users.id", ondelete="CASCADE"), nullable=False, index=True)
+    portfolio_id: Mapped[str] = mapped_column(ForeignKey("v11_portfolios.id", ondelete="CASCADE"), nullable=False, index=True)
+    signal_id: Mapped[str] = mapped_column(ForeignKey("signals.id", ondelete="CASCADE"), nullable=False)
+    symbol: Mapped[str] = mapped_column(String(40), nullable=False, index=True)
+    direction: Mapped[str] = mapped_column(String(8), nullable=False)
+    status: Mapped[str] = mapped_column(String(16), nullable=False, default="pending_entry")
+    quality_score: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    planned_entry: Mapped[float] = mapped_column(Float, nullable=False)
+    actual_entry: Mapped[float | None] = mapped_column(Float)
+    stop_loss: Mapped[float] = mapped_column(Float, nullable=False)
+    tp1: Mapped[float] = mapped_column(Float, nullable=False)
+    tp2: Mapped[float] = mapped_column(Float, nullable=False)
+    tp3: Mapped[float] = mapped_column(Float, nullable=False)
+    quantity: Mapped[float] = mapped_column(Float, nullable=False)
+    remaining_quantity: Mapped[float] = mapped_column(Float, nullable=False)
+    risk_cash: Mapped[float] = mapped_column(Float, nullable=False)
+    realized_pnl: Mapped[float] = mapped_column(Float, nullable=False, default=0.0)
+    fees_paid: Mapped[float] = mapped_column(Float, nullable=False, default=0.0)
+    last_price: Mapped[float | None] = mapped_column(Float)
+    last_event_time_ms: Mapped[int] = mapped_column(BigInteger, nullable=False, default=0)
+    last_event_id: Mapped[str | None] = mapped_column(String(80))
+    entry_time: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    closed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
+
+
+class ForwardTestEvent(Base):
+    __tablename__ = "v11_forward_test_events"
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    trade_id: Mapped[str] = mapped_column(ForeignKey("v11_forward_test_trades.id", ondelete="CASCADE"), nullable=False, index=True)
+    event_type: Mapped[str] = mapped_column(String(40), nullable=False)
+    market_price: Mapped[float] = mapped_column(Float, nullable=False)
+    fill_price: Mapped[float | None] = mapped_column(Float)
+    quantity: Mapped[float] = mapped_column(Float, nullable=False, default=0.0)
+    pnl: Mapped[float] = mapped_column(Float, nullable=False, default=0.0)
+    fee: Mapped[float] = mapped_column(Float, nullable=False, default=0.0)
+    event_time_ms: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    event_time: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    details_json: Mapped[dict] = mapped_column(JSON, nullable=False, default=dict)

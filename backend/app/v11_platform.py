@@ -20,6 +20,11 @@ from .db_models import (
     User, Session as LoginSession, Portfolio, BrokerAccount,
     PaperOrder, AuditEvent, BacktestRun,
 )
+from .forward_testing import (
+    start_forward_run, stop_forward_run, list_forward_runs,
+    list_forward_trades, list_forward_events, forward_summary,
+    compare_forward_to_backtest,
+)
 
 TOKEN_TTL_HOURS = 12
 PBKDF2_ITERATIONS = 310_000
@@ -598,6 +603,17 @@ class ClosePaperOrderRequest(BaseModel):
     exit_price: float = Field(gt=0)
 
 
+class ForwardTestStartRequest(BaseModel):
+    portfolio_id: str
+    account_id: str
+    symbols: list[str] = Field(min_length=1, max_length=50)
+    risk_per_trade_pct: float = Field(default=0.5, gt=0, le=5)
+    min_quality_score: int = Field(default=70, ge=0, le=100)
+    commission_pct: float = Field(default=0.04, ge=0, le=1)
+    slippage_bps: float = Field(default=2.0, ge=0, le=500)
+    include_existing_signals: bool = False
+
+
 def current_user(authorization: str | None = Header(default=None)) -> dict[str, str]:
     if not authorization or not authorization.lower().startswith("bearer "):
         raise HTTPException(status_code=401, detail="Bearer token required")
@@ -646,6 +662,7 @@ def api_readiness():
             "tenant_paper_accounts": {"status": "available", "details": "Per-user portfolios, broker-labelled paper accounts and tenant-scoped orders"},
             "binance": {"status": "paper_simulation", "details": "Public market-data adapter exists; orders are simulated only"},
             "mt5": {"status": "paper_simulation", "details": "Broker-labelled paper accounts; terminal/EA bridge is not configured"},
+            "forward_testing": {"status": "available", "details": "Tick-driven tenant-scoped paper forward testing with partial targets, adverse slippage, commissions and event audit trail"},
             "walk_forward_monte_carlo": {"status": "not_implemented", "details": "Requires strategy-generated historical signals and validation suite"},
             "production_deployment": {"status": "partial", "details": "Docker foundation exists; TLS, secrets vault, Redis workers and production database migration require deployment-specific work"},
         },
@@ -720,6 +737,78 @@ def api_list_orders(portfolio_id: str, status: str | None = None, user=Depends(c
 def api_close_order(order_id: str, payload: ClosePaperOrderRequest, user=Depends(current_user)):
     try:
         return close_paper_order(user["id"], order_id, payload.exit_price)
+    except LookupError as exc:
+        raise HTTPException(status_code=404, detail=str(exc))
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc))
+
+
+@router.post("/forward/runs", status_code=201)
+def api_start_forward_run(payload: ForwardTestStartRequest, user=Depends(current_user)):
+    try:
+        return start_forward_run(
+            user["id"], payload.portfolio_id, payload.account_id, payload.symbols,
+            payload.risk_per_trade_pct, payload.min_quality_score,
+            payload.commission_pct, payload.slippage_bps,
+            payload.include_existing_signals,
+        )
+    except LookupError as exc:
+        raise HTTPException(status_code=404, detail=str(exc))
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc))
+
+
+@router.get("/forward/runs")
+def api_list_forward_runs(portfolio_id: str, limit: int = 20, user=Depends(current_user)):
+    try:
+        return {"items": list_forward_runs(user["id"], portfolio_id, limit)}
+    except LookupError as exc:
+        raise HTTPException(status_code=404, detail=str(exc))
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc))
+
+
+@router.post("/forward/runs/{run_id}/stop")
+def api_stop_forward_run(run_id: str, user=Depends(current_user)):
+    try:
+        return stop_forward_run(user["id"], run_id)
+    except LookupError as exc:
+        raise HTTPException(status_code=404, detail=str(exc))
+
+
+@router.get("/forward/runs/{run_id}/trades")
+def api_forward_trades(run_id: str, status: str | None = None, limit: int = 200, user=Depends(current_user)):
+    allowed = ("pending_entry", "open", "tp1_hit", "tp2_hit", "tp3_hit", "stopped")
+    if status and status.lower() not in allowed:
+        raise HTTPException(status_code=422, detail="Invalid forward-trade status")
+    try:
+        return {"items": list_forward_trades(user["id"], run_id, status, limit)}
+    except LookupError as exc:
+        raise HTTPException(status_code=404, detail=str(exc))
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc))
+
+
+@router.get("/forward/runs/{run_id}/summary")
+def api_forward_summary(run_id: str, user=Depends(current_user)):
+    try:
+        return forward_summary(user["id"], run_id)
+    except LookupError as exc:
+        raise HTTPException(status_code=404, detail=str(exc))
+
+
+@router.get("/forward/runs/{run_id}/comparison")
+def api_forward_backtest_comparison(run_id: str, backtest_run_id: str, user=Depends(current_user)):
+    try:
+        return compare_forward_to_backtest(user["id"], run_id, backtest_run_id)
+    except LookupError as exc:
+        raise HTTPException(status_code=404, detail=str(exc))
+
+
+@router.get("/forward/trades/{trade_id}/events")
+def api_forward_trade_events(trade_id: str, limit: int = 200, user=Depends(current_user)):
+    try:
+        return {"items": list_forward_events(user["id"], trade_id, limit)}
     except LookupError as exc:
         raise HTTPException(status_code=404, detail=str(exc))
     except ValueError as exc:

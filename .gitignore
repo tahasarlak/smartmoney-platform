@@ -45,3 +45,6 @@ test_neon_connection.py
 # Logs
 *.log
 
+
+# Phase 7 local installer backups
+.phase7-backups/

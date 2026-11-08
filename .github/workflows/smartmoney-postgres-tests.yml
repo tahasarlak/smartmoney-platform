@@ -80,7 +80,7 @@ jobs:
         run: |
           python -m compileall -q app tests
           python - <<'PY'
-          from app import database, db_models, v11_platform, market_store, signal_journal
+          from app import database, db_models, v11_platform, market_store, signal_journal, forward_testing
           from app.live_price_monitor import LivePriceMonitor
           print("PYTHON SYNTAX AND IMPORTS PASSED")
           PY
@@ -164,6 +164,8 @@ jobs:
               "v11_audit_events", "v11_backtest_runs",
               "market_prices", "market_watchlist", "signals",
               "signal_events", "alembic_version",
+              "v11_forward_test_runs", "v11_forward_test_trades",
+              "v11_forward_test_events",
           }
 
           with psycopg.connect(dsn, connect_timeout=30, sslmode="require") as conn:
@@ -194,8 +196,24 @@ jobs:
 
                   cur.execute("SELECT version_num FROM alembic_version")
                   revisions = [row[0] for row in cur.fetchall()]
-                  if revisions != ["0001_initial"]:
+                  if revisions != ["0002_phase7_forward_testing"]:
                       raise SystemExit(f"Unexpected Alembic revision state: {revisions}")
 
-          print("POSTGRESQL PHASE 3 DATABASE VERIFICATION PASSED")
+                  cur.execute("""
+                      SELECT column_name
+                      FROM information_schema.columns
+                      WHERE table_schema='public' AND table_name='v11_forward_test_trades'
+                  """)
+                  forward_columns = {row[0] for row in cur.fetchall()}
+                  required_forward_columns = {
+                      "run_id", "signal_id", "status", "planned_entry",
+                      "actual_entry", "stop_loss", "tp1", "tp2", "tp3",
+                      "quantity", "remaining_quantity", "realized_pnl",
+                      "fees_paid", "last_event_time_ms", "last_event_id"
+                  }
+                  missing_forward_columns = required_forward_columns - forward_columns
+                  if missing_forward_columns:
+                      raise SystemExit("Missing forward-test columns: " + ", ".join(sorted(missing_forward_columns)))
+
+          print("POSTGRESQL PHASE 7 FORWARD-TEST SCHEMA VERIFICATION PASSED")
           PY
