@@ -2219,3 +2219,27 @@ def api_phase31_burn_in(
 
 # ===== END TRADF PHASE 31 =====
 
+
+
+# ===== TRADF PHASE 32: explainable strategy/regime intelligence =====
+from .phase32_strategy_intelligence import evaluate_strategy_candidates as _phase32_evaluate
+
+@router.post("/strategy-intelligence/evaluate")
+def api_phase32_strategy_intelligence(
+    payload: dict[str, Any],
+    user=Depends(current_user),
+):
+    # Authentication is required. The supplied metrics are analytical inputs only;
+    # no portfolio settings, strategy states, capital allocations or orders are changed.
+    try:
+        return _phase32_evaluate(
+            market_regime=payload.get("market_regime", "unknown"),
+            strategies=payload.get("strategies", []),
+            minimum_trades=payload.get("minimum_trades", 30),
+            max_drawdown_pct=payload.get("max_drawdown_pct", 15.0),
+        )
+    except (TypeError, ValueError) as exc:
+        raise HTTPException(status_code=422, detail=str(exc))
+
+# ===== END TRADF PHASE 32 =====
+
