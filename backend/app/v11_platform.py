@@ -362,6 +362,9 @@ def create_paper_order(
                 BrokerAccount.user_id == user_id,
                 Portfolio.user_id == user_id,
             )
+            # Serialize order admission per portfolio. Without this row lock,
+            # concurrent requests can both pass the same risk/open-position checks.
+            .with_for_update(of=Portfolio)
         ).first()
         if account is None:
             raise LookupError("Broker account not found")

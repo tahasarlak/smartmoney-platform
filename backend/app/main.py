@@ -1,6 +1,11 @@
+from contextlib import asynccontextmanager
+import asyncio
+
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
-import asyncio
+from sqlalchemy import text
+
+from .database import get_engine
 from .config import settings
 from .schemas import SettingsIn, OHLCVRequest, AnalysisRequest, PositionSizeRequest, PaperOrderRequest
 from .market_data import binance_klines
@@ -19,7 +24,6 @@ from .multi_backtesting import run_multi_symbol_backtest
 from .calibration import evaluate_calibration
 from .advanced_schemas import RiskPreflightRequest, BacktestRequest, MultiSymbolBacktestRequest
 from .signal_journal import (
-    init_db as init_signal_db,
     create_signal,
     get_signal,
     list_signals,
@@ -30,10 +34,25 @@ from .signal_journal import (
 from .signal_schemas import SignalPriceUpdate
 from .live_price_monitor import live_price_monitor
 from .v8_engine import V8ScanRequest, V8StartRequest, V8IntelligenceService
-from .v11_platform import router as v11_router, init_v11_db
+from .v11_platform import router as v11_router
 
-app = FastAPI(title="SmartMoney Platform API", version="11.0.0",
-              description="SmartMoney research and tenant-scoped paper trading API. Live execution is disabled.")
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    # Alembic owns schema creation. Application startup only starts runtime services.
+    await live_price_monitor.start()
+    try:
+        yield
+    finally:
+        await live_price_monitor.stop()
+
+
+app = FastAPI(
+    title="SmartMoney Platform API",
+    version="11.0.0",
+    description="SmartMoney research and tenant-scoped paper trading API. Live execution is disabled.",
+    lifespan=lifespan,
+)
 app.add_middleware(CORSMiddleware, allow_origins=settings.api_cors_origins.split(","),
                    allow_credentials=True, allow_methods=["*"], allow_headers=["*"])
 app.include_router(v11_router)
@@ -49,7 +68,30 @@ v8_service = V8IntelligenceService(
 
 @app.get("/health")
 def health():
-    return {"status":"ok", "environment":settings.app_env, "live_trading_enabled":settings.live_trading_enabled}
+    """Liveness probe: confirms the API process is responsive."""
+    return {
+        "status": "ok",
+        "environment": settings.app_env,
+        "live_trading_enabled": False,
+    }
+
+
+@app.get("/health/ready")
+def readiness():
+    """Readiness probe: confirms the configured PostgreSQL database is reachable."""
+    try:
+        with get_engine().connect() as connection:
+            connection.execute(text("SELECT 1"))
+        return {
+            "status": "ready",
+            "database": "postgresql",
+            "live_trading_enabled": False,
+        }
+    except Exception:
+        raise HTTPException(
+            status_code=503,
+            detail="Database is not ready",
+        )
 
 @app.get("/api/v1/settings/defaults")
 def defaults():
@@ -251,18 +293,6 @@ async def scan_binance_multi_symbol(payload: MultiSymbolScanRequest):
 
 
 # SMARTMONEY SIGNAL JOURNAL V6 + LIVE MONITOR V7
-
-@app.on_event("startup")
-async def initialize_signal_and_live_monitor():
-    init_signal_db()
-    init_v11_db()
-    await live_price_monitor.start()
-
-
-@app.on_event("shutdown")
-async def shutdown_live_monitor():
-    await live_price_monitor.stop()
-
 
 # V6: Create signal from current market analysis
 @app.post("/api/v1/signals/from-market/{symbol}")

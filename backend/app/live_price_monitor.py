@@ -72,26 +72,39 @@ class LivePriceMonitor:
         self._signals_updated = 0
         self._connected = False
         self._symbols: list[str] = []
+        self._initialized = False
+        self._watchlist: set[str] = set()
+        self._prices: dict[str, dict[str, Any]] = {}
+
+    def _ensure_initialized(self) -> None:
+        """Load persisted state on demand, never during module import."""
+        if self._initialized:
+            return
         init_market_store()
-        self._watchlist: set[str] = set(list_watchlist())
+        saved_watchlist = list_watchlist()
         saved_prices = list_market_prices()
-        self._prices: dict[str, dict[str, Any]] = {
+        self._watchlist = set(saved_watchlist)
+        self._prices = {
             item["symbol"]: {
                 "symbol": item["symbol"], "price": item["price"],
-                "event_time": item["event_time"], "event_time_ms": item["event_time_ms"],
+                "event_time": item["event_time"],
+                "event_time_ms": item["event_time_ms"],
             }
             for item in saved_prices
         }
         latest = max(saved_prices, key=lambda item: item["event_time_ms"], default=None)
-        self._last_message_at: str | None = latest["event_time"] if latest else None
+        self._last_message_at = latest["event_time"] if latest else None
+        self._initialized = True
 
     def add_symbol(self, value: str) -> dict[str, Any]:
+        self._ensure_initialized()
         symbol = normalize_symbol(value)
         self._watchlist.add(symbol)
         add_watchlist_symbol(symbol)
         return self.watchlist_status()
 
     def remove_symbol(self, value: str) -> dict[str, Any]:
+        self._ensure_initialized()
         symbol = normalize_symbol(value)
         self._watchlist.discard(symbol)
         remove_watchlist_symbol(symbol)
@@ -110,6 +123,13 @@ class LivePriceMonitor:
 
     async def start(self) -> dict[str, Any]:
         if self._task and not self._task.done(): return self.status()
+        try:
+            self._ensure_initialized()
+        except Exception as exc:
+            # Keep the API process alive if PostgreSQL is temporarily unavailable.
+            # The background loop will retry through its normal reconnect path.
+            self._last_error = f"{type(exc).__name__}: {exc}"
+            log.warning("Live monitor could not preload PostgreSQL state: %s", self._last_error)
         self._stop = asyncio.Event()
         self._task = asyncio.create_task(self._run(), name="binance-live-price-monitor")
         return self.status()
@@ -137,6 +157,7 @@ class LivePriceMonitor:
     async def _run(self):
         while not self._stop.is_set():
             try:
+                self._ensure_initialized()
                 symbols = sorted(set(active_symbols()) | {s.lower() for s in self._watchlist})
                 self._symbols = symbols
                 if not symbols:

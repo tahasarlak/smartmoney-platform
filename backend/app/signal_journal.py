@@ -18,6 +18,18 @@ def init_db() -> None:
 
 def _now(): return datetime.now(timezone.utc)
 
+
+def _parse_timestamp(value: str | datetime) -> datetime:
+    """Parse an ISO timestamp and normalize it to UTC."""
+    if isinstance(value, datetime):
+        parsed = value
+    else:
+        parsed = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc)
+
+
 def _row(row):
     if row is None: return None
     item = {c.name: getattr(row, c.name) for c in row.__table__.columns}
@@ -107,13 +119,30 @@ def update_signal_price(signal_id: str, price: float, timestamp: str | None = No
                         user_id: str | None = None, include_private: bool = False):
     price = float(price)
     if not math.isfinite(price) or price <= 0: raise ValueError("Price must be a finite positive number")
-    now_text = timestamp or _now().isoformat()
+    incoming_time = _parse_timestamp(timestamp) if timestamp else _now()
+    now_text = incoming_time.isoformat()
     with session_scope() as db:
         stmt = select(Signal).where(Signal.id == signal_id)
         if not include_private:
             stmt = stmt.where(_visibility_filter(user_id))
         row = db.scalar(stmt.with_for_update())
         if row is None: return None
+
+        # Terminal signals are immutable: a later manual or delayed price
+        # update cannot reopen or otherwise rewrite a closed outcome.
+        if row.status not in ("WAITING_ENTRY", "OPEN", "TP1_HIT", "TP2_HIT"):
+            return _row(row)
+
+        # A delayed/out-of-order market tick must never overwrite a newer price
+        # or move a signal through its lifecycle using stale market data.
+        if row.last_price_at:
+            try:
+                previous_time = _parse_timestamp(row.last_price_at)
+            except (TypeError, ValueError):
+                previous_time = None
+            if previous_time is not None and incoming_time <= previous_time:
+                return _row(row)
+
         old, new, reason = row.status, row.status, None
         if old in ("WAITING_ENTRY", "OPEN", "TP1_HIT", "TP2_HIT"):
             entered = price <= row.entry if row.direction == "bullish" else price >= row.entry
@@ -141,7 +170,11 @@ def closed_signal_outcomes(limit: int = 5000) -> list[dict[str, Any]]:
     with get_session_factory()() as db:
         rows = db.execute(select(Signal.id, Signal.symbol, Signal.quality_score,
             Signal.status, Signal.closed_at, Signal.close_reason)
-            .where(Signal.status.in_(("TP3_HIT", "STOPPED")), Signal.closed_at.is_not(None))
+            .where(
+                Signal.visibility == "public",
+                Signal.status.in_(("TP3_HIT", "STOPPED")),
+                Signal.closed_at.is_not(None),
+            )
             .order_by(Signal.closed_at.asc()).limit(limit)).all()
     return [{"signal_id": r.id, "symbol": r.symbol, "quality_score": int(r.quality_score or 0),
              "won": r.status == "TP3_HIT", "closed_at": r.closed_at, "status": r.status} for r in rows]

@@ -185,3 +185,35 @@ def test_internal_price_monitor_can_update_private_signal():
         saved["id"], 99.5, include_private=True
     )["status"] == "OPEN"
     assert journal.get_signal(saved["id"], user_id=owner)["status"] == "OPEN"
+
+
+def test_stale_price_update_cannot_overwrite_newer_signal_price():
+    saved = journal.create_signal(plan())
+    sid = saved["id"]
+
+    newer = journal.update_signal_price(
+        sid, 99.5, "2026-11-08T12:00:00+00:00"
+    )
+    stale = journal.update_signal_price(
+        sid, 105, "2026-11-08T11:59:59+00:00"
+    )
+
+    assert newer["status"] == "OPEN"
+    assert stale["status"] == "OPEN"
+    assert stale["last_price"] == pytest.approx(99.5)
+    assert stale["last_price_at"] == "2026-11-08T12:00:00+00:00"
+
+
+def test_terminal_signal_cannot_be_changed_by_later_price_update():
+    saved = journal.create_signal(plan())
+    sid = saved["id"]
+
+    journal.update_signal_price(sid, 99.5, "2026-11-08T12:00:00+00:00")
+    closed = journal.update_signal_price(sid, 106, "2026-11-08T12:01:00+00:00")
+    attempted_rewrite = journal.update_signal_price(
+        sid, 98, "2026-11-08T12:02:00+00:00"
+    )
+
+    assert closed["status"] == "TP3_HIT"
+    assert attempted_rewrite["status"] == "TP3_HIT"
+    assert attempted_rewrite["last_price"] == pytest.approx(106)
