@@ -1629,3 +1629,35 @@ def api_portfolio_performance(
         raise HTTPException(status_code=404, detail=str(exc))
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc))
+
+
+from .strategy_validation import build_strategy_validation
+
+
+@router.get("/portfolios/{portfolio_id}/validation")
+def api_portfolio_statistical_validation(
+    portfolio_id: str,
+    limit: int = 500,
+    bootstrap_iterations: int = 2000,
+    user=Depends(current_user),
+):
+    """Return descriptive statistical validation for closed paper execution trades."""
+    if not 1 <= limit <= 500:
+        raise HTTPException(status_code=422, detail="limit must be between 1 and 500")
+    if not 500 <= bootstrap_iterations <= 10000:
+        raise HTTPException(status_code=422, detail="bootstrap_iterations must be between 500 and 10000")
+    try:
+        portfolio = get_portfolio(user["id"], portfolio_id)
+        trades = list_execution_trades(user["id"], portfolio_id, status=None, limit=limit)
+        result = build_strategy_validation(
+            trades=trades, bootstrap_iterations=bootstrap_iterations
+        )
+        result["portfolio_id"] = portfolio_id
+        result["portfolio_name"] = portfolio["name"]
+        result["trades_returned"] = len(trades)
+        result["truncated"] = len(trades) >= limit
+        return result
+    except LookupError as exc:
+        raise HTTPException(status_code=404, detail=str(exc))
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc))
