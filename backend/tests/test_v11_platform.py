@@ -1,16 +1,29 @@
 from __future__ import annotations
 
 import pytest
+import uuid
 from fastapi import HTTPException
 
 from app import v11_platform as v11
 
 
 @pytest.fixture(autouse=True)
-def isolated_db(tmp_path, monkeypatch):
-    monkeypatch.setenv("SMARTMONEY_V11_DB", str(tmp_path / "v11.sqlite3"))
-    v11.init_v11_db()
+def isolated_db():
+    from sqlalchemy import text
+    from app.database import session_scope
 
+    with session_scope() as db:
+        db.execute(text("""
+            TRUNCATE TABLE
+                v11_audit_events,
+                v11_paper_orders,
+                v11_broker_accounts,
+                v11_sessions,
+                v11_backtest_runs,
+                v11_portfolios,
+                v11_users
+            RESTART IDENTITY CASCADE
+        """))
 
 def make_user(email="alice@example.com"):
     return v11.register_user(email, "correct-horse-battery")
@@ -26,12 +39,15 @@ def test_registration_login_and_token_authentication():
 
 
 def test_duplicate_email_and_weak_password_are_rejected():
-    make_user()
-    with pytest.raises(ValueError, match="already exists"):
-        make_user()
-    with pytest.raises(ValueError, match="10 characters"):
-        v11.register_user("bob@example.com", "short")
+    email = f"duplicate-{uuid.uuid4().hex[:10]}@example.com"
+    v11.register_user(email, "correct-horse-battery")
 
+    with pytest.raises(ValueError, match="already exists"):
+        v11.register_user(email, "correct-horse-battery")
+
+    weak_email = f"weak-{uuid.uuid4().hex[:10]}@example.com"
+    with pytest.raises(ValueError, match="10 characters"):
+        v11.register_user(weak_email, "short")
 
 def test_portfolio_and_broker_accounts_are_tenant_scoped():
     alice = make_user("alice@example.com")
@@ -115,16 +131,17 @@ def test_http_auth_and_tenant_scoped_paper_workflow():
     from fastapi import FastAPI
     from fastapi.testclient import TestClient
 
+    suffix = uuid.uuid4().hex[:10]
     app = FastAPI()
     app.include_router(v11.router)
     client = TestClient(app)
 
     reg = client.post("/api/v1/v11/auth/register", json={
-        "email": "http-user@example.com", "password": "correct-horse-battery"
+        "email": f"http-user-{suffix}@example.com", "password": "correct-horse-battery"
     })
     assert reg.status_code == 201
     login = client.post("/api/v1/v11/auth/login", json={
-        "email": "http-user@example.com", "password": "correct-horse-battery"
+        "email": f"http-user-{suffix}@example.com", "password": "correct-horse-battery"
     })
     assert login.status_code == 200
     token = login.json()["access_token"]
@@ -142,10 +159,10 @@ def test_http_auth_and_tenant_scoped_paper_workflow():
     })
     assert order.status_code == 201
     other_user = client.post("/api/v1/v11/auth/register", json={
-        "email": "another@example.com", "password": "correct-horse-battery"
+        "email": f"another-{suffix}@example.com", "password": "correct-horse-battery"
     }).json()
     other_login = client.post("/api/v1/v11/auth/login", json={
-        "email": "another@example.com", "password": "correct-horse-battery"
+        "email": f"another-{suffix}@example.com", "password": "correct-horse-battery"
     }).json()
     other_headers = {"Authorization": f"Bearer {other_login['access_token']}"}
     cross_tenant = client.get(f"/api/v1/v11/portfolios/{portfolio_id}", headers=other_headers)

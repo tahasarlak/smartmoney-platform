@@ -1,73 +1,162 @@
-import os
-from pathlib import Path
+import uuid
 import pytest
 
 from app import signal_journal as journal
 
-@pytest.fixture
-def temp_db(tmp_path, monkeypatch):
-    db=tmp_path/"signals.sqlite3"
-    monkeypatch.setenv("TRADE_JOURNAL_DB",str(db))
-    journal.init_db()
-    return db
+from sqlalchemy import delete
+from app.database import session_scope
+from app.db_models import Signal
 
-def plan(direction="bullish"):
-    if direction=="bullish":
-        entry,stop,tps=100,98,[102,104,106]
+
+@pytest.fixture(autouse=True)
+def cleanup_test_signals(monkeypatch):
+    created_ids = []
+    original_create = journal.create_signal
+
+    def tracked_create(*args, **kwargs):
+        result = original_create(*args, **kwargs)
+        created_ids.append(result["id"])
+        return result
+
+    monkeypatch.setattr(journal, "create_signal", tracked_create)
+
+    yield
+
+    if created_ids:
+        with session_scope() as db:
+            db.execute(
+                delete(Signal).where(Signal.id.in_(created_ids))
+            )
+
+
+
+def unique_symbol():
+    return "T" + uuid.uuid4().hex[:10].upper()
+
+
+def plan(direction="bullish", symbol=None):
+    if direction == "bullish":
+        entry, stop, tps = 100, 98, [102, 104, 106]
+        current_price = 105
     else:
-        entry,stop,tps=100,102,[98,96,94]
-    return {"symbol":"TESTUSDT","status":"pending_retest","direction":direction,
-            "setup_class":"aligned","quality_score":70,"entry":entry,"stop_loss":stop,
-            "take_profits":[{"price":x} for x in tps],"zone":{"low":99,"high":101},
-            "minimum_rr_requested":2,"risk_percent_setting":0.5,
-            "current_price":105 if direction=="bullish" else 95,
-            "execution_allowed":False}
+        entry, stop, tps = 100, 102, [98, 96, 94]
+        current_price = 95
 
-def test_create_signal_persists_and_logs_event(temp_db):
-    saved=journal.create_signal(plan())
-    assert saved["status"]=="WAITING_ENTRY"
+    return {
+        "symbol": symbol or unique_symbol(),
+        "status": "pending_retest",
+        "direction": direction,
+        "setup_class": "aligned",
+        "quality_score": 70,
+        "entry": entry,
+        "stop_loss": stop,
+        "take_profits": [{"price": x} for x in tps],
+        "zone": {"low": 99, "high": 101},
+        "minimum_rr_requested": 2,
+        "risk_percent_setting": 0.5,
+        "current_price": current_price,
+        "execution_allowed": False,
+    }
+
+
+def test_create_signal_persists_and_logs_event():
+    saved = journal.create_signal(plan())
+
+    assert saved["status"] == "WAITING_ENTRY"
     assert saved["id"]
-    assert len(journal.signal_events(saved["id"]))==1
-    assert journal.get_signal(saved["id"])["symbol"]=="TESTUSDT"
+    assert saved["symbol"]
 
-def test_bullish_lifecycle_entry_tp1_tp2_tp3(temp_db):
-    s=journal.create_signal(plan())
-    sid=s["id"]
-    assert journal.update_signal_price(sid,99.5)["status"]=="OPEN"
-    assert journal.update_signal_price(sid,102)["status"]=="TP1_HIT"
-    assert journal.update_signal_price(sid,104)["status"]=="TP2_HIT"
-    assert journal.update_signal_price(sid,106)["status"]=="TP3_HIT"
-    assert len(journal.signal_events(sid))==5
+    events = journal.signal_events(saved["id"])
+    assert len(events) == 1
 
-def test_bearish_lifecycle_stop_loss(temp_db):
-    s=journal.create_signal(plan("bearish"))
-    sid=s["id"]
-    assert journal.update_signal_price(sid,100.5)["status"]=="OPEN"
-    assert journal.update_signal_price(sid,102.1)["status"]=="STOPPED"
-
-def test_rejects_invalid_plan_and_nonpositive_price(temp_db):
-    p=plan()
-    p["execution_allowed"]=True
-    with pytest.raises(ValueError): journal.create_signal(p)
-    s=journal.create_signal(plan())
-    with pytest.raises(ValueError): journal.update_signal_price(s["id"],0)
-
-def test_list_filters_by_symbol(temp_db):
-    journal.create_signal(plan())
-    assert len(journal.list_signals(symbol="TESTUSDT"))==1
-    assert len(journal.list_signals(symbol="OTHERUSDT"))==0
+    fetched = journal.get_signal(saved["id"])
+    assert fetched["symbol"] == saved["symbol"]
 
 
-def test_price_gap_can_reach_tp3_in_one_update(temp_db):
-    s=journal.create_signal(plan())
-    journal.update_signal_price(s["id"],99.5)
-    updated=journal.update_signal_price(s["id"],106)
-    assert updated["status"]=="TP3_HIT"
+def test_bullish_lifecycle_entry_tp1_tp2_tp3():
+    saved = journal.create_signal(plan())
+    sid = saved["id"]
+
+    assert journal.update_signal_price(sid, 99.5)["status"] == "OPEN"
+    assert journal.update_signal_price(sid, 102)["status"] == "TP1_HIT"
+    assert journal.update_signal_price(sid, 104)["status"] == "TP2_HIT"
+    assert journal.update_signal_price(sid, 106)["status"] == "TP3_HIT"
+
+    assert len(journal.signal_events(sid)) == 5
+
+
+def test_bearish_lifecycle_stop_loss():
+    saved = journal.create_signal(plan("bearish"))
+    sid = saved["id"]
+
+    assert journal.update_signal_price(sid, 100.5)["status"] == "OPEN"
+    assert journal.update_signal_price(sid, 102.1)["status"] == "STOPPED"
+
+
+def test_rejects_invalid_plan_and_nonpositive_price():
+    invalid_plan = plan()
+    invalid_plan["execution_allowed"] = True
+
+    with pytest.raises(ValueError):
+        journal.create_signal(invalid_plan)
+
+    saved = journal.create_signal(plan())
+
+    with pytest.raises(ValueError):
+        journal.update_signal_price(saved["id"], 0)
+
+
+def test_list_filters_by_symbol():
+    target_symbol = unique_symbol()
+    other_symbol = unique_symbol()
+
+    target = journal.create_signal(plan(symbol=target_symbol))
+    journal.create_signal(plan(symbol=other_symbol))
+
+    results = journal.list_signals(symbol=target_symbol)
+
+    assert len(results) == 1
+    assert results[0]["id"] == target["id"]
+    assert results[0]["symbol"] == target_symbol
+
+    other_results = journal.list_signals(symbol=other_symbol)
+
+    assert len(other_results) == 1
+    assert other_results[0]["symbol"] == other_symbol
+
+
+def test_price_gap_can_reach_tp3_in_one_update():
+    saved = journal.create_signal(plan())
+
+    journal.update_signal_price(saved["id"], 99.5)
+    updated = journal.update_signal_price(saved["id"], 106)
+
+    assert updated["status"] == "TP3_HIT"
     assert updated["closed_at"] is not None
 
 
-def test_price_update_rejects_nan_and_infinity(temp_db):
-    s=journal.create_signal(plan())
+def test_price_update_rejects_nan_and_infinity():
+    saved = journal.create_signal(plan())
+
     for value in (float("nan"), float("inf"), float("-inf")):
         with pytest.raises(ValueError):
-            journal.update_signal_price(s["id"],value)
+            journal.update_signal_price(saved["id"], value)
+
+
+def test_private_signal_requires_owner():
+    with pytest.raises(ValueError):
+        journal.create_signal(plan(), visibility="private")
+
+
+def test_private_signal_is_not_visible_to_other_users():
+    owner = "test-owner-" + uuid.uuid4().hex
+
+    saved = journal.create_signal(
+        plan(),
+        user_id=owner,
+        visibility="private",
+    )
+
+    assert journal.get_signal(saved["id"], user_id=owner) is not None
+    assert journal.get_signal(saved["id"], user_id="another-user") is None
+    assert journal.get_signal(saved["id"]) is None

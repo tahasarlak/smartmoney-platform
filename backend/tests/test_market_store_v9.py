@@ -1,37 +1,100 @@
+import uuid
+
+from app.database import session_scope
+from app.db_models import MarketPrice
 from app.market_store import (
-    add_watchlist_symbol, list_watchlist, remove_watchlist_symbol,
-    upsert_market_price, list_market_prices,
+    add_watchlist_symbol,
+    list_watchlist,
+    remove_watchlist_symbol,
+    upsert_market_price,
+    list_market_prices,
 )
 
 
-def test_watchlist_and_prices_persist_across_store_calls(tmp_path, monkeypatch):
-    monkeypatch.setenv("MARKET_STATE_DB", str(tmp_path / "market.sqlite3"))
-    assert add_watchlist_symbol("BTCUSDT") == ["BTCUSDT"]
-    assert add_watchlist_symbol("ETHUSDT") == ["BTCUSDT", "ETHUSDT"]
-    upsert_market_price({
-        "symbol": "BTCUSDT", "price": 100.5,
-        "event_time": "2026-01-01T00:00:00+00:00",
-        "event_time_ms": 1767225600000,
-    })
-    assert list_market_prices()[0]["price"] == 100.5
-    assert remove_watchlist_symbol("BTCUSDT") == ["ETHUSDT"]
-    assert list_watchlist() == ["ETHUSDT"]
+def unique_symbol():
+    return "T" + uuid.uuid4().hex[:10].upper()
 
 
-def test_stale_price_event_does_not_overwrite_newer_tick(tmp_path, monkeypatch):
-    monkeypatch.setenv("MARKET_STATE_DB", str(tmp_path / "market.sqlite3"))
-    base = {
-        "symbol": "BTCUSDT", "event_time": "2026-01-01T00:00:00+00:00",
-    }
-    upsert_market_price({**base, "price": 101, "event_time_ms": 200})
-    upsert_market_price({**base, "price": 99, "event_time_ms": 100})
-    assert list_market_prices()[0]["price"] == 101
+def cleanup_symbol(symbol):
+    with session_scope() as db:
+        row = db.get(MarketPrice, symbol)
+        if row is not None:
+            db.delete(row)
+
+    remove_watchlist_symbol(symbol)
 
 
-def test_live_monitor_restores_watchlist_after_reconstruction(tmp_path, monkeypatch):
-    monkeypatch.setenv("MARKET_STATE_DB", str(tmp_path / "monitor.sqlite3"))
-    from app.live_price_monitor import LivePriceMonitor
-    first = LivePriceMonitor()
-    first.add_symbol("ETHUSDT")
-    second = LivePriceMonitor()
-    assert second.watchlist_status()["symbols"] == ["ETHUSDT"]
+def test_watchlist_and_prices_persist_across_store_calls():
+    symbol = unique_symbol()
+
+    try:
+        assert symbol in add_watchlist_symbol(symbol)
+        assert symbol in list_watchlist()
+
+        upsert_market_price({
+            "symbol": symbol,
+            "price": 100.5,
+            "event_time": "2026-01-01T00:00:00+00:00",
+            "event_time_ms": 1767225600000,
+        })
+
+        prices = [
+            item for item in list_market_prices()
+            if item["symbol"] == symbol
+        ]
+
+        assert len(prices) == 1
+        assert prices[0]["price"] == 100.5
+
+    finally:
+        cleanup_symbol(symbol)
+
+
+def test_stale_price_event_does_not_overwrite_newer_tick():
+    symbol = unique_symbol()
+
+    try:
+        base = {
+            "symbol": symbol,
+            "event_time": "2026-01-01T00:00:00+00:00",
+        }
+
+        upsert_market_price({
+            **base,
+            "price": 101,
+            "event_time_ms": 200,
+        })
+
+        upsert_market_price({
+            **base,
+            "price": 99,
+            "event_time_ms": 100,
+        })
+
+        prices = [
+            item for item in list_market_prices()
+            if item["symbol"] == symbol
+        ]
+
+        assert len(prices) == 1
+        assert prices[0]["price"] == 101
+
+    finally:
+        cleanup_symbol(symbol)
+
+
+def test_live_monitor_restores_watchlist_after_reconstruction():
+    symbol = unique_symbol()
+
+    try:
+        from app.live_price_monitor import LivePriceMonitor
+
+        first = LivePriceMonitor()
+        first.add_symbol(symbol)
+
+        second = LivePriceMonitor()
+
+        assert symbol in second.watchlist_status()["symbols"]
+
+    finally:
+        cleanup_symbol(symbol)

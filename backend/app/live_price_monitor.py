@@ -99,14 +99,14 @@ class LivePriceMonitor:
 
     def watchlist_status(self) -> dict[str, Any]:
         return {"symbols": sorted(self._watchlist), "count": len(self._watchlist),
-                "storage": "sqlite", "execution_allowed": False}
+                "storage": "postgresql", "execution_allowed": False}
 
     def market_snapshot(self) -> dict[str, Any]:
         prices = list_market_prices()
         latest = max(prices, key=lambda item: item["event_time_ms"], default=None)
         return {"prices": prices, "count": len(prices),
                 "updated_at": latest["updated_at"] if latest else None,
-                "storage": "sqlite", "execution_allowed": False}
+                "storage": "postgresql", "execution_allowed": False}
 
     async def start(self) -> dict[str, Any]:
         if self._task and not self._task.done(): return self.status()
@@ -127,7 +127,7 @@ class LivePriceMonitor:
         return {"running": bool(self._task and not self._task.done()),
                 "connected": self._connected, "symbols": self._symbols,
                 "watchlist": sorted(self._watchlist),
-                "watchlist_storage": "sqlite",
+                "watchlist_storage": "postgresql",
                 "messages_received": self._messages_received,
                 "signals_updated": self._signals_updated,
                 "cached_prices": len(list_market_prices()),
