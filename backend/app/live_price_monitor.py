@@ -111,9 +111,13 @@ class LivePriceMonitor:
         return self.watchlist_status()
 
     def watchlist_status(self) -> dict[str, Any]:
-        return {"symbols": sorted(self._watchlist), "count": len(self._watchlist),
-                "storage": "postgresql", "execution_allowed": False}
-
+        self._ensure_initialized()
+        return {
+            "symbols": sorted(self._watchlist),
+            "count": len(self._watchlist),
+            "storage": "postgresql",
+            "execution_allowed": False,
+        }
     def market_snapshot(self) -> dict[str, Any]:
         prices = list_market_prices()
         latest = max(prices, key=lambda item: item["event_time_ms"], default=None)
