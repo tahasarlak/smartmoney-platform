@@ -30,3 +30,16 @@ html[dir="rtl"] .v11-guard{flex-direction:row-reverse}
 
 /* Keep Persian typography consistent across the main terminal and V11 workspace. */
 html[dir="rtl"] body{font-family:Vazirmatn,Inter,sans-serif}
+
+/* Unified TRADF navigation for the V11 paper workspace */
+.v11-top{gap:18px;flex-wrap:wrap}
+.v11-tradf-brand{text-decoration:none;color:var(--text);flex-shrink:0}
+.v11-tradf-brand b{font-size:17px;letter-spacing:.08em}
+.v11-brand-dot{color:var(--green)}
+.v11-global-nav{display:flex;align-items:center;justify-content:center;gap:5px;flex:1;flex-wrap:wrap}
+.v11-global-nav a,.v11-global-nav .v11-current{font-size:10px;text-decoration:none;color:var(--muted);padding:8px 9px;border:1px solid transparent;border-radius:8px;white-space:nowrap}
+.v11-global-nav a:hover{color:var(--text);border-color:var(--line);background:#111d2d}
+.v11-global-nav .v11-current{color:var(--green);border-color:#28533f;background:#10251f}
+.v11-user{flex-shrink:0}
+@media(max-width:1050px){.v11-global-nav{order:3;flex-basis:100%;justify-content:flex-start}.v11-top{align-items:flex-start}}
+@media(max-width:600px){.v11-global-nav{gap:3px}.v11-global-nav a,.v11-global-nav .v11-current{font-size:9px;padding:7px 8px}}
