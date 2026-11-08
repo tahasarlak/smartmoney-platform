@@ -246,3 +246,83 @@ class ForwardTestEvent(Base):
     event_time_ms: Mapped[int] = mapped_column(BigInteger, nullable=False)
     event_time: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     details_json: Mapped[dict] = mapped_column(JSON, nullable=False, default=dict)
+
+
+class ExecutionTrade(Base):
+    """Persistent tenant-scoped paper execution lifecycle; never a broker order."""
+    __tablename__ = "v11_execution_trades"
+    __table_args__ = (
+        UniqueConstraint("user_id", "idempotency_key", name="uq_execution_user_idempotency"),
+        CheckConstraint("broker IN ('binance','mt5')"),
+        CheckConstraint("side IN ('long','short')"),
+        CheckConstraint("status IN ('pending_entry','open','partially_closed','closed','cancelled')"),
+        CheckConstraint("quantity > 0 AND remaining_quantity >= 0 AND remaining_quantity <= quantity"),
+        CheckConstraint("planned_entry > 0 AND stop_loss > 0 AND tp1 > 0 AND tp2 > 0 AND tp3 > 0"),
+        CheckConstraint("commission_pct >= 0 AND commission_pct <= 5"),
+        CheckConstraint("slippage_bps >= 0 AND slippage_bps <= 1000"),
+        CheckConstraint("tp1_fraction > 0 AND tp2_fraction > 0 AND tp3_fraction > 0 AND tp1_fraction + tp2_fraction + tp3_fraction BETWEEN 0.999999 AND 1.000001"),
+        CheckConstraint("trailing_stop_pct IS NULL OR (trailing_stop_pct > 0 AND trailing_stop_pct <= 20)"),
+        Index("idx_execution_portfolio_status", "portfolio_id", "status"),
+        Index("idx_execution_user_created", "user_id", "created_at"),
+    )
+    id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    user_id: Mapped[str] = mapped_column(ForeignKey("v11_users.id", ondelete="CASCADE"), nullable=False, index=True)
+    portfolio_id: Mapped[str] = mapped_column(ForeignKey("v11_portfolios.id", ondelete="CASCADE"), nullable=False, index=True)
+    account_id: Mapped[str] = mapped_column(ForeignKey("v11_broker_accounts.id", ondelete="CASCADE"), nullable=False)
+    broker: Mapped[str] = mapped_column(String(20), nullable=False)
+    idempotency_key: Mapped[str] = mapped_column(String(80), nullable=False)
+    symbol: Mapped[str] = mapped_column(String(40), nullable=False, index=True)
+    side: Mapped[str] = mapped_column(String(8), nullable=False)
+    status: Mapped[str] = mapped_column(String(20), nullable=False, default="pending_entry")
+    planned_entry: Mapped[float] = mapped_column(Float, nullable=False)
+    avg_entry_price: Mapped[float | None] = mapped_column(Float)
+    stop_loss: Mapped[float] = mapped_column(Float, nullable=False)
+    initial_stop_loss: Mapped[float] = mapped_column(Float, nullable=False)
+    tp1: Mapped[float] = mapped_column(Float, nullable=False)
+    tp2: Mapped[float] = mapped_column(Float, nullable=False)
+    tp3: Mapped[float] = mapped_column(Float, nullable=False)
+    quantity: Mapped[float] = mapped_column(Float, nullable=False)
+    remaining_quantity: Mapped[float] = mapped_column(Float, nullable=False)
+    tp1_fraction: Mapped[float] = mapped_column(Float, nullable=False, default=0.5)
+    tp2_fraction: Mapped[float] = mapped_column(Float, nullable=False, default=0.3)
+    tp3_fraction: Mapped[float] = mapped_column(Float, nullable=False, default=0.2)
+    tp1_hit: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    tp2_hit: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    tp3_hit: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    move_stop_to_breakeven_after_tp1: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
+    trailing_stop_pct: Mapped[float | None] = mapped_column(Float)
+    high_water: Mapped[float | None] = mapped_column(Float)
+    low_water: Mapped[float | None] = mapped_column(Float)
+    commission_pct: Mapped[float] = mapped_column(Float, nullable=False, default=0.04)
+    slippage_bps: Mapped[float] = mapped_column(Float, nullable=False, default=2.0)
+    realized_pnl: Mapped[float] = mapped_column(Float, nullable=False, default=0.0)
+    fees_paid: Mapped[float] = mapped_column(Float, nullable=False, default=0.0)
+    last_price: Mapped[float | None] = mapped_column(Float)
+    last_event_time_ms: Mapped[int] = mapped_column(BigInteger, nullable=False, default=0)
+    last_event_id: Mapped[str | None] = mapped_column(String(80))
+    entry_filled_at_ms: Mapped[int | None] = mapped_column(BigInteger)
+    closed_at_ms: Mapped[int | None] = mapped_column(BigInteger)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
+
+
+class ExecutionEvent(Base):
+    """Immutable event journal for paper execution; source_event_id makes ticks idempotent."""
+    __tablename__ = "v11_execution_events"
+    __table_args__ = (
+        UniqueConstraint("trade_id", "source_event_id", "sequence_no", name="uq_execution_event_source_sequence"),
+        Index("idx_execution_events_trade_time", "trade_id", "event_time_ms"),
+    )
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    trade_id: Mapped[str] = mapped_column(ForeignKey("v11_execution_trades.id", ondelete="CASCADE"), nullable=False, index=True)
+    source_event_id: Mapped[str] = mapped_column(String(80), nullable=False)
+    sequence_no: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    event_type: Mapped[str] = mapped_column(String(40), nullable=False)
+    market_price: Mapped[float] = mapped_column(Float, nullable=False)
+    fill_price: Mapped[float | None] = mapped_column(Float)
+    quantity: Mapped[float] = mapped_column(Float, nullable=False, default=0.0)
+    pnl: Mapped[float] = mapped_column(Float, nullable=False, default=0.0)
+    fee: Mapped[float] = mapped_column(Float, nullable=False, default=0.0)
+    event_time_ms: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    event_time: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    details_json: Mapped[dict] = mapped_column(JSON, nullable=False, default=dict)

@@ -19,10 +19,14 @@ from .database import get_session_factory
 from .db_models import (
     User, Session as LoginSession, Portfolio, BrokerAccount,
     PaperOrder, AuditEvent, BacktestRun, ForwardTestRun, ForwardTestTrade,
+    ExecutionTrade, ExecutionEvent,
 )
 from .risk_engine import (
     calculate_risk_position_size, calculate_correlation_matrix,
     assess_portfolio_risk, allocate_capital,
+)
+from .execution_engine import (
+    validate_execution_plan, process_trade_tick, cancel_pending_trade,
 )
 from .forward_testing import (
     start_forward_run, stop_forward_run, list_forward_runs,
@@ -223,13 +227,26 @@ def _portfolio_dict(db: OrmSession, p: Portfolio) -> dict[str, Any]:
     )).all()
     realized = sum(float(o.realized_pnl or 0) for o in orders if o.status == "closed")
     open_orders = [o for o in orders if o.status == "open"]
+    execution_trades = db.scalars(select(ExecutionTrade).where(
+        ExecutionTrade.portfolio_id == p.id, ExecutionTrade.user_id == p.user_id,
+    )).all()
+    # Partial exits realize PnL before the remaining position is closed.
+    # Include realized PnL from every execution state in portfolio cash equity.
+    realized_execution = sum(float(t.realized_pnl or 0) - float(t.fees_paid or 0)
+                             for t in execution_trades)
+    active_execution = [t for t in execution_trades if t.status in ("pending_entry", "open", "partially_closed") and t.remaining_quantity > 0]
+    realized += realized_execution
     open_risk = sum(float(o.risk_cash) for o in open_orders)
+    for t in active_execution:
+        entry = float(t.avg_entry_price or t.planned_entry)
+        per_unit = (entry - float(t.stop_loss)) if t.side == "long" else (float(t.stop_loss) - entry)
+        open_risk += max(0.0, per_unit * float(t.remaining_quantity))
     equity = float(p.initial_equity)
     return {
         "id": p.id, "name": p.name, "base_currency": p.base_currency,
         "initial_equity": equity, "realized_pnl": round(realized, 8),
         "cash_equity": round(equity + realized, 8),
-        "open_positions": len(open_orders), "open_risk_cash": round(open_risk, 8),
+        "open_positions": len(open_orders) + len(active_execution), "open_risk_cash": round(open_risk, 8),
         "open_risk_pct": round(open_risk / equity * 100, 6),
         "max_open_trades": p.max_open_trades,
         "max_portfolio_risk_pct": p.max_portfolio_risk_pct,
@@ -645,6 +662,38 @@ class ForwardTestStartRequest(BaseModel):
     include_existing_signals: bool = False
 
 
+class ExecutionTradeCreateRequest(BaseModel):
+    portfolio_id: str
+    account_id: str
+    idempotency_key: str = Field(min_length=8, max_length=80)
+    symbol: str = Field(min_length=1, max_length=40)
+    side: str = Field(pattern="^(long|short)$")
+    quantity: float = Field(gt=0)
+    planned_entry: float = Field(gt=0)
+    stop_loss: float = Field(gt=0)
+    tp1: float = Field(gt=0)
+    tp2: float = Field(gt=0)
+    tp3: float = Field(gt=0)
+    commission_pct: float = Field(default=0.04, ge=0, le=5)
+    slippage_bps: float = Field(default=2.0, ge=0, le=1000)
+    tp1_fraction: float = Field(default=0.50, gt=0, le=1)
+    tp2_fraction: float = Field(default=0.30, gt=0, le=1)
+    tp3_fraction: float = Field(default=0.20, gt=0, le=1)
+    move_stop_to_breakeven_after_tp1: bool = True
+    trailing_stop_pct: float | None = Field(default=None, gt=0, le=20)
+
+
+class ExecutionTickRequest(BaseModel):
+    event_id: str = Field(min_length=1, max_length=80)
+    market_price: float = Field(gt=0)
+    event_time_ms: int = Field(gt=0)
+
+
+class ExecutionCancelRequest(BaseModel):
+    event_id: str = Field(min_length=1, max_length=80)
+
+
+
 def current_user(authorization: str | None = Header(default=None)) -> dict[str, str]:
     if not authorization or not authorization.lower().startswith("bearer "):
         raise HTTPException(status_code=401, detail="Bearer token required")
@@ -967,6 +1016,29 @@ def _portfolio_risk_inputs(user_id: str, portfolio_id: str):
                 "risk_cash": max(0.0, float(trade.risk_cash) * scale),
                 "source": "forward_test",
             })
+        execution_trades = db.scalars(select(ExecutionTrade).where(
+            ExecutionTrade.user_id == user_id,
+            ExecutionTrade.portfolio_id == portfolio_id,
+            ExecutionTrade.status.in_(("pending_entry", "open", "partially_closed")),
+            ExecutionTrade.remaining_quantity > 0,
+        )).all()
+        for trade in execution_trades:
+            qty = float(trade.remaining_quantity)
+            entry = float(trade.avg_entry_price or trade.planned_entry)
+            positions.append({
+                "symbol": trade.symbol, "direction": trade.side,
+                "quantity": qty, "entry_price": entry,
+                "stop_loss": float(trade.stop_loss),
+                "risk_cash": max(0.0, (entry - float(trade.stop_loss)) * qty) if trade.side == "long" else max(0.0, (float(trade.stop_loss) - entry) * qty),
+                "source": "paper_execution",
+            })
+        # TP1/TP2 may realize PnL while a trade remains open. Include it in
+        # equity immediately; filtering to closed trades understates equity/risk capacity.
+        realized_execution = db.scalar(select(func.coalesce(func.sum(ExecutionTrade.realized_pnl - ExecutionTrade.fees_paid), 0)).where(
+            ExecutionTrade.user_id == user_id,
+            ExecutionTrade.portfolio_id == portfolio_id,
+        )) or 0.0
+        equity += float(realized_execution)
         return {
             "equity": equity,
             "positions": positions,
@@ -976,6 +1048,7 @@ def _portfolio_risk_inputs(user_id: str, portfolio_id: str):
             "portfolio_id": portfolio_id,
             "paper_position_count": len(paper_orders),
             "forward_position_count": len(forward_trades),
+            "execution_position_count": len(execution_trades),
         }
     finally:
         db.close()
@@ -995,7 +1068,8 @@ def api_portfolio_risk_assessment(portfolio_id: str, user=Depends(current_user))
             "portfolio_id": portfolio_id,
             "paper_position_count": snapshot["paper_position_count"],
             "forward_position_count": snapshot["forward_position_count"],
-            "data_scope": "open paper orders plus open trades from active forward-test runs",
+            "execution_position_count": snapshot["execution_position_count"],
+            "data_scope": "open legacy paper orders, active forward-test trades, and phase 9 paper execution trades",
         })
         return report
     except LookupError as exc:
@@ -1022,6 +1096,465 @@ def api_portfolio_risk_allocate(
         )
         report["portfolio_id"] = portfolio_id
         return report
+    except LookupError as exc:
+        raise HTTPException(status_code=404, detail=str(exc))
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc))
+
+
+# ---------------------------------------------------------------------------
+# Phase 9: persistent paper execution. This service never calls a broker.
+# ---------------------------------------------------------------------------
+
+def _execution_state(trade: ExecutionTrade) -> dict[str, Any]:
+    return {
+        "side": trade.side, "status": trade.status,
+        "planned_entry": float(trade.planned_entry),
+        "avg_entry_price": float(trade.avg_entry_price) if trade.avg_entry_price is not None else None,
+        "stop_loss": float(trade.stop_loss), "initial_stop_loss": float(trade.initial_stop_loss),
+        "tp1": float(trade.tp1), "tp2": float(trade.tp2), "tp3": float(trade.tp3),
+        "quantity": float(trade.quantity), "remaining_quantity": float(trade.remaining_quantity),
+        "tp1_fraction": float(trade.tp1_fraction), "tp2_fraction": float(trade.tp2_fraction),
+        "tp3_fraction": float(trade.tp3_fraction), "tp1_hit": bool(trade.tp1_hit),
+        "tp2_hit": bool(trade.tp2_hit), "tp3_hit": bool(trade.tp3_hit),
+        "move_stop_to_breakeven_after_tp1": bool(trade.move_stop_to_breakeven_after_tp1),
+        "trailing_stop_pct": float(trade.trailing_stop_pct) if trade.trailing_stop_pct is not None else None,
+        "high_water": float(trade.high_water) if trade.high_water is not None else None,
+        "low_water": float(trade.low_water) if trade.low_water is not None else None,
+        "commission_pct": float(trade.commission_pct), "slippage_bps": float(trade.slippage_bps),
+        "realized_pnl": float(trade.realized_pnl), "fees_paid": float(trade.fees_paid),
+        "last_price": float(trade.last_price) if trade.last_price is not None else None,
+        "last_event_time_ms": int(trade.last_event_time_ms),
+        "entry_filled_at_ms": trade.entry_filled_at_ms, "closed_at_ms": trade.closed_at_ms,
+    }
+
+
+def _execution_trade_dict(trade: ExecutionTrade) -> dict[str, Any]:
+    state = _execution_state(trade)
+    return {
+        "id": trade.id, "user_id": trade.user_id, "portfolio_id": trade.portfolio_id,
+        "account_id": trade.account_id, "broker": trade.broker, "symbol": trade.symbol,
+        "idempotency_key": trade.idempotency_key, **state,
+        "net_realized_pnl": round(state["realized_pnl"] - state["fees_paid"], 8),
+        "mode": "paper", "execution_allowed": False,
+        "created_at": _iso(trade.created_at), "updated_at": _iso(trade.updated_at),
+    }
+
+
+
+def _execution_request_matches(existing: ExecutionTrade, payload: ExecutionTradeCreateRequest,
+                               symbol: str, plan: dict[str, Any]) -> bool:
+    numeric = (
+        (existing.quantity, plan["quantity"]),
+        (existing.planned_entry, plan["planned_entry"]),
+        (existing.initial_stop_loss, plan["stop_loss"]),
+        (existing.tp1, plan["tp1"]), (existing.tp2, plan["tp2"]),
+        (existing.tp3, plan["tp3"]),
+        (existing.commission_pct, plan["commission_pct"]),
+        (existing.slippage_bps, plan["slippage_bps"]),
+        (existing.tp1_fraction, plan["tp1_fraction"]),
+        (existing.tp2_fraction, plan["tp2_fraction"]),
+        (existing.tp3_fraction, plan["tp3_fraction"]),
+    )
+    return (
+        existing.portfolio_id == payload.portfolio_id
+        and existing.account_id == payload.account_id
+        and existing.symbol == symbol
+        and existing.side == plan["side"]
+        and all(math.isclose(float(a), float(b), rel_tol=0, abs_tol=1e-12) for a, b in numeric)
+        and existing.move_stop_to_breakeven_after_tp1 == payload.move_stop_to_breakeven_after_tp1
+        and ((existing.trailing_stop_pct is None and plan["trailing_stop_pct"] is None)
+             or (existing.trailing_stop_pct is not None and plan["trailing_stop_pct"] is not None
+                 and math.isclose(float(existing.trailing_stop_pct), float(plan["trailing_stop_pct"]), rel_tol=0, abs_tol=1e-12)))
+    )
+
+
+
+def create_execution_trade(user_id: str, payload: ExecutionTradeCreateRequest) -> dict[str, Any]:
+    symbol = payload.symbol.strip().upper()
+    if not symbol or not symbol.replace("_", "").isalnum():
+        raise ValueError("Invalid symbol")
+    plan = validate_execution_plan(
+        side=payload.side, quantity=payload.quantity, planned_entry=payload.planned_entry,
+        stop_loss=payload.stop_loss, tp1=payload.tp1, tp2=payload.tp2, tp3=payload.tp3,
+        commission_pct=payload.commission_pct, slippage_bps=payload.slippage_bps,
+        target_fractions=(payload.tp1_fraction, payload.tp2_fraction, payload.tp3_fraction),
+        trailing_stop_pct=payload.trailing_stop_pct,
+    )
+    db = _session()
+    try:
+        existing = db.scalar(select(ExecutionTrade).where(
+            ExecutionTrade.user_id == user_id,
+            ExecutionTrade.idempotency_key == payload.idempotency_key,
+        ))
+        if existing:
+            if not _execution_request_matches(existing, payload, symbol, plan):
+                raise ValueError("Idempotency key was already used for a different execution request")
+            return {**_execution_trade_dict(existing), "idempotent_replay": True}
+
+        joined = db.execute(
+            select(BrokerAccount, Portfolio)
+            .join(Portfolio, Portfolio.id == BrokerAccount.portfolio_id)
+            .where(BrokerAccount.id == payload.account_id,
+                   BrokerAccount.user_id == user_id,
+                   Portfolio.id == payload.portfolio_id,
+                   Portfolio.user_id == user_id)
+            .with_for_update(of=Portfolio)
+        ).first()
+        if joined is None:
+            raise LookupError("Paper account or portfolio not found")
+        account, portfolio = joined
+        if account.mode != "paper":
+            raise ValueError("Phase 9 accepts paper accounts only")
+
+        legacy_orders = db.scalars(select(PaperOrder).where(
+            PaperOrder.user_id == user_id, PaperOrder.portfolio_id == portfolio.id,
+            PaperOrder.status == "open")).all()
+        all_forward_runs = db.scalars(select(ForwardTestRun).where(
+            ForwardTestRun.user_id == user_id, ForwardTestRun.portfolio_id == portfolio.id)).all()
+        active_runs = [r for r in all_forward_runs if r.status == "active"]
+        active_run_ids = [r.id for r in active_runs]
+        forward_trades = db.scalars(select(ForwardTestTrade).where(
+            ForwardTestTrade.user_id == user_id, ForwardTestTrade.portfolio_id == portfolio.id,
+            ForwardTestTrade.run_id.in_(active_run_ids) if active_run_ids else False,
+            ForwardTestTrade.status.in_(("pending_entry", "open", "tp1_hit", "tp2_hit")),
+            ForwardTestTrade.remaining_quantity > 0)).all()
+        execution_trades = db.scalars(select(ExecutionTrade).where(
+            ExecutionTrade.user_id == user_id, ExecutionTrade.portfolio_id == portfolio.id,
+            ExecutionTrade.status.in_(("pending_entry", "open", "partially_closed")),
+            ExecutionTrade.remaining_quantity > 0)).all()
+
+        realized_paper = db.scalar(select(func.coalesce(func.sum(PaperOrder.realized_pnl), 0)).where(
+            PaperOrder.user_id == user_id, PaperOrder.portfolio_id == portfolio.id,
+            PaperOrder.status == "closed")) or 0.0
+        realized_forward = sum(float(r.realized_pnl or 0.0) - float(r.fees_paid or 0.0) for r in all_forward_runs)
+        # Include realized partial exits from still-active execution trades.
+        realized_execution = db.scalar(select(func.coalesce(func.sum(ExecutionTrade.realized_pnl - ExecutionTrade.fees_paid), 0)).where(
+            ExecutionTrade.user_id == user_id, ExecutionTrade.portfolio_id == portfolio.id)) or 0.0
+        equity = float(portfolio.initial_equity) + float(realized_paper) + realized_forward + float(realized_execution)
+        if not math.isfinite(equity) or equity <= 0:
+            raise ValueError("Portfolio equity is not positive")
+
+        positions = []
+        for order in legacy_orders:
+            positions.append({"symbol": order.symbol, "direction": order.side,
+                "quantity": float(order.quantity), "entry_price": float(order.entry_price),
+                "stop_loss": float(order.stop_loss), "risk_cash": float(order.risk_cash)})
+        for item in forward_trades:
+            qty = float(item.remaining_quantity)
+            scale = qty / float(item.quantity) if float(item.quantity) > 0 else 0.0
+            entry = float(item.actual_entry or item.planned_entry)
+            positions.append({"symbol": item.symbol, "direction": item.direction,
+                "quantity": qty, "entry_price": entry, "stop_loss": float(item.stop_loss),
+                "risk_cash": max(0.0, float(item.risk_cash) * scale)})
+        for item in execution_trades:
+            qty = float(item.remaining_quantity)
+            entry = float(item.avg_entry_price or item.planned_entry)
+            positions.append({"symbol": item.symbol, "direction": item.side,
+                "quantity": qty, "entry_price": entry, "stop_loss": float(item.stop_loss),
+                "risk_cash": max(0.0, (entry - float(item.stop_loss)) * qty) if item.side == "long" else max(0.0, (float(item.stop_loss) - entry) * qty)})
+
+        requested_risk = abs(float(payload.planned_entry) - float(payload.stop_loss)) * float(payload.quantity)
+        if requested_risk / equity * 100 > float(portfolio.max_trade_risk_pct) + 1e-9:
+            raise ValueError("Per-trade risk limit exceeded")
+        aggregate_risk = sum(float(x["risk_cash"]) for x in positions) + requested_risk
+        if aggregate_risk / equity * 100 > float(portfolio.max_portfolio_risk_pct) + 1e-9:
+            raise ValueError("Portfolio aggregate open-risk limit exceeded")
+        if len(positions) + 1 > int(portfolio.max_open_trades):
+            raise ValueError("Portfolio max_open_trades limit reached")
+
+        now = _now()
+        trade = ExecutionTrade(
+            id=str(uuid.uuid4()), user_id=user_id, portfolio_id=portfolio.id,
+            account_id=account.id, broker=account.broker, idempotency_key=payload.idempotency_key,
+            symbol=symbol, side=plan["side"], status="pending_entry",
+            planned_entry=plan["planned_entry"], avg_entry_price=None,
+            stop_loss=plan["stop_loss"], initial_stop_loss=plan["stop_loss"],
+            tp1=plan["tp1"], tp2=plan["tp2"], tp3=plan["tp3"],
+            quantity=plan["quantity"], remaining_quantity=plan["quantity"],
+            tp1_fraction=plan["tp1_fraction"], tp2_fraction=plan["tp2_fraction"], tp3_fraction=plan["tp3_fraction"],
+            move_stop_to_breakeven_after_tp1=payload.move_stop_to_breakeven_after_tp1,
+            trailing_stop_pct=plan["trailing_stop_pct"], commission_pct=plan["commission_pct"],
+            slippage_bps=plan["slippage_bps"], realized_pnl=0.0, fees_paid=0.0,
+            last_event_time_ms=0, created_at=now, updated_at=now,
+        )
+        db.add(trade)
+        db.flush()
+        db.add(ExecutionEvent(
+            trade_id=trade.id, source_event_id="ORDER_CREATED", sequence_no=0,
+            event_type="ORDER_CREATED", market_price=plan["planned_entry"],
+            fill_price=None, quantity=plan["quantity"], pnl=0.0, fee=0.0,
+            event_time_ms=int(now.timestamp() * 1000), event_time=now,
+            details_json={"mode": "paper", "broker": account.broker, "live_execution": False},
+        ))
+        _audit(db, user_id, "PAPER_EXECUTION_CREATED", portfolio.id, trade.id,
+               {"symbol": symbol, "side": plan["side"], "quantity": plan["quantity"], "idempotency_key": payload.idempotency_key})
+        db.commit()
+        db.refresh(trade)
+        return {**_execution_trade_dict(trade), "idempotent_replay": False}
+    except IntegrityError:
+        db.rollback()
+        existing = db.scalar(select(ExecutionTrade).where(
+            ExecutionTrade.user_id == user_id,
+            ExecutionTrade.idempotency_key == payload.idempotency_key,
+        ))
+        if existing:
+            if not _execution_request_matches(existing, payload, symbol, plan):
+                raise ValueError("Idempotency key was already used for a different execution request")
+            return {**_execution_trade_dict(existing), "idempotent_replay": True}
+        raise
+    except Exception:
+        db.rollback()
+        raise
+    finally:
+        db.close()
+
+
+def list_execution_trades(user_id: str, portfolio_id: str, status: str | None = None, limit: int = 100) -> list[dict[str, Any]]:
+    if not 1 <= int(limit) <= 500:
+        raise ValueError("limit must be between 1 and 500")
+    db = _session()
+    try:
+        _owned_portfolio(db, user_id, portfolio_id)
+        query = select(ExecutionTrade).where(
+            ExecutionTrade.user_id == user_id, ExecutionTrade.portfolio_id == portfolio_id)
+        if status:
+            if status not in ("pending_entry", "open", "partially_closed", "closed", "cancelled"):
+                raise ValueError("Invalid execution-trade status")
+            query = query.where(ExecutionTrade.status == status)
+        rows = db.scalars(query.order_by(ExecutionTrade.created_at.desc()).limit(limit)).all()
+        return [_execution_trade_dict(x) for x in rows]
+    finally:
+        db.close()
+
+
+def get_execution_trade(user_id: str, trade_id: str) -> dict[str, Any]:
+    db = _session()
+    try:
+        trade = db.scalar(select(ExecutionTrade).where(
+            ExecutionTrade.id == trade_id, ExecutionTrade.user_id == user_id))
+        if trade is None:
+            raise LookupError("Execution trade not found")
+        return _execution_trade_dict(trade)
+    finally:
+        db.close()
+
+
+def process_execution_tick(user_id: str, trade_id: str, payload: ExecutionTickRequest, force_close: bool = False) -> dict[str, Any]:
+    db = _session()
+    try:
+        trade = db.scalar(select(ExecutionTrade).where(
+            ExecutionTrade.id == trade_id, ExecutionTrade.user_id == user_id).with_for_update())
+        if trade is None:
+            raise LookupError("Execution trade not found")
+        duplicate = trade.last_event_id == payload.event_id or db.scalar(select(ExecutionEvent).where(
+            ExecutionEvent.trade_id == trade.id,
+            ExecutionEvent.source_event_id == payload.event_id).limit(1)) is not None
+        if duplicate:
+            return {**_execution_trade_dict(trade), "idempotent_replay": True,
+                    "events": [], "message": "Duplicate market event ignored"}
+        updated, generated = process_trade_tick(
+            _execution_state(trade), market_price=payload.market_price,
+            event_time_ms=payload.event_time_ms, event_id=payload.event_id,
+            force_close=force_close,
+        )
+        for key, value in updated.items():
+            if hasattr(trade, key):
+                setattr(trade, key, value)
+        now = _now()
+        trade.updated_at = now
+        trade.last_event_id = payload.event_id
+        event_time = datetime.fromtimestamp(payload.event_time_ms / 1000.0, tz=timezone.utc)
+        journal_events = [item for item in generated if item["event_type"] != "PRICE_OBSERVED"]
+        for seq, item in enumerate(journal_events):
+            db.add(ExecutionEvent(
+                trade_id=trade.id, source_event_id=payload.event_id, sequence_no=seq,
+                event_type=item["event_type"], market_price=item["market_price"],
+                fill_price=item["fill_price"], quantity=item["quantity"], pnl=item["pnl"],
+                fee=item["fee"], event_time_ms=payload.event_time_ms, event_time=event_time,
+                details_json=item["details"],
+            ))
+            if item["event_type"] not in ("PRICE_OBSERVED", "TRAILING_STOP_UPDATED", "STOP_MOVED_TO_BREAKEVEN"):
+                _audit(db, user_id, "PAPER_EXECUTION_" + item["event_type"], trade.portfolio_id,
+                       trade.id, {"event_id": payload.event_id, "quantity": item["quantity"],
+                                  "fill_price": item["fill_price"], "pnl": item["pnl"], "fee": item["fee"]})
+        db.commit()
+        db.refresh(trade)
+        return {**_execution_trade_dict(trade), "idempotent_replay": False,
+                "events": generated, "message": "Paper market event processed; no broker order was sent"}
+    except Exception:
+        db.rollback()
+        raise
+    finally:
+        db.close()
+
+
+def cancel_execution_trade(user_id: str, trade_id: str, event_id: str) -> dict[str, Any]:
+    db = _session()
+    try:
+        trade = db.scalar(select(ExecutionTrade).where(
+            ExecutionTrade.id == trade_id, ExecutionTrade.user_id == user_id).with_for_update())
+        if trade is None:
+            raise LookupError("Execution trade not found")
+        duplicate = trade.last_event_id == event_id or db.scalar(select(ExecutionEvent).where(
+            ExecutionEvent.trade_id == trade.id, ExecutionEvent.source_event_id == event_id).limit(1)) is not None
+        if duplicate:
+            return {**_execution_trade_dict(trade), "idempotent_replay": True}
+        updated = cancel_pending_trade(_execution_state(trade))
+        trade.status = updated["status"]
+        trade.remaining_quantity = updated["remaining_quantity"]
+        trade.updated_at = _now()
+        trade.last_event_id = event_id
+        event_time_ms = int(trade.updated_at.timestamp() * 1000)
+        db.add(ExecutionEvent(
+            trade_id=trade.id, source_event_id=event_id, sequence_no=0,
+            event_type="ORDER_CANCELLED", market_price=float(trade.last_price or trade.planned_entry),
+            fill_price=None, quantity=0.0, pnl=0.0, fee=0.0,
+            event_time_ms=event_time_ms, event_time=trade.updated_at,
+            details_json={"reason": "user_cancelled_pending_entry"},
+        ))
+        _audit(db, user_id, "PAPER_EXECUTION_CANCELLED", trade.portfolio_id, trade.id, {"event_id": event_id})
+        db.commit()
+        db.refresh(trade)
+        return {**_execution_trade_dict(trade), "idempotent_replay": False}
+    except Exception:
+        db.rollback()
+        raise
+    finally:
+        db.close()
+
+
+
+def active_execution_symbols() -> list[str]:
+    """Symbols with active Binance paper executions for the live market monitor."""
+    db = _session()
+    try:
+        rows = db.scalars(select(ExecutionTrade.symbol).where(
+            ExecutionTrade.broker == "binance",
+            ExecutionTrade.status.in_(("pending_entry", "open", "partially_closed")),
+            ExecutionTrade.remaining_quantity > 0,
+        ).distinct()).all()
+        return sorted({str(x).upper() for x in rows})
+    finally:
+        db.close()
+
+
+def process_active_execution_market_event(event: dict[str, Any]) -> int:
+    """Fan one accepted public Binance trade tick into all matching paper trades."""
+    symbol = str(event.get("symbol", "")).strip().upper()
+    if not symbol:
+        return 0
+    db = _session()
+    try:
+        trade_ids = db.execute(select(ExecutionTrade.user_id, ExecutionTrade.id).where(
+            ExecutionTrade.broker == "binance", ExecutionTrade.symbol == symbol,
+            ExecutionTrade.status.in_(("pending_entry", "open", "partially_closed")),
+            ExecutionTrade.remaining_quantity > 0,
+        )).all()
+    finally:
+        db.close()
+    raw_event_id = event.get("event_id")
+    event_id = f"binance:{raw_event_id}" if raw_event_id is not None else f"binance:{event.get('event_time_ms')}:{float(event['price']):.12g}"
+    event_id = event_id[:80]
+    processed = 0
+    for owner_id, trade_id in trade_ids:
+        try:
+            process_execution_tick(owner_id, trade_id, ExecutionTickRequest(
+                event_id=event_id, market_price=float(event["price"]),
+                event_time_ms=int(event["event_time_ms"]),
+            ))
+            processed += 1
+        except ValueError as exc:
+            # A replayed/out-of-order feed event must not stop other tenants' trades.
+            if "chronological" not in str(exc) and "terminal" not in str(exc):
+                raise
+    return processed
+
+
+
+def list_execution_events(user_id: str, trade_id: str, limit: int = 200) -> list[dict[str, Any]]:
+    if not 1 <= int(limit) <= 1000:
+        raise ValueError("limit must be between 1 and 1000")
+    db = _session()
+    try:
+        trade = db.scalar(select(ExecutionTrade).where(
+            ExecutionTrade.id == trade_id, ExecutionTrade.user_id == user_id))
+        if trade is None:
+            raise LookupError("Execution trade not found")
+        rows = db.scalars(select(ExecutionEvent).where(
+            ExecutionEvent.trade_id == trade_id).order_by(ExecutionEvent.id).limit(limit)).all()
+        return [{"id": x.id, "source_event_id": x.source_event_id,
+                 "event_type": x.event_type, "market_price": x.market_price,
+                 "fill_price": x.fill_price, "quantity": x.quantity, "pnl": x.pnl,
+                 "fee": x.fee, "event_time_ms": x.event_time_ms,
+                 "event_time": _iso(x.event_time), "details": x.details_json} for x in rows]
+    finally:
+        db.close()
+
+
+@router.post("/execution/paper/trades", status_code=201)
+def api_create_execution_trade(payload: ExecutionTradeCreateRequest, user=Depends(current_user)):
+    try:
+        return create_execution_trade(user["id"], payload)
+    except LookupError as exc:
+        raise HTTPException(status_code=404, detail=str(exc))
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc))
+
+
+@router.get("/execution/paper/trades")
+def api_list_execution_trades(portfolio_id: str, status: str | None = None, limit: int = 100, user=Depends(current_user)):
+    try:
+        return {"items": list_execution_trades(user["id"], portfolio_id, status, limit),
+                "mode": "paper", "execution_allowed": False}
+    except LookupError as exc:
+        raise HTTPException(status_code=404, detail=str(exc))
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc))
+
+
+@router.get("/execution/paper/trades/{trade_id}")
+def api_get_execution_trade(trade_id: str, user=Depends(current_user)):
+    try:
+        return get_execution_trade(user["id"], trade_id)
+    except LookupError as exc:
+        raise HTTPException(status_code=404, detail=str(exc))
+
+
+@router.post("/execution/paper/trades/{trade_id}/ticks")
+def api_process_execution_tick(trade_id: str, payload: ExecutionTickRequest, user=Depends(current_user)):
+    try:
+        return process_execution_tick(user["id"], trade_id, payload)
+    except LookupError as exc:
+        raise HTTPException(status_code=404, detail=str(exc))
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc))
+
+
+@router.post("/execution/paper/trades/{trade_id}/close")
+def api_close_execution_trade(trade_id: str, payload: ExecutionTickRequest, user=Depends(current_user)):
+    try:
+        return process_execution_tick(user["id"], trade_id, payload, force_close=True)
+    except LookupError as exc:
+        raise HTTPException(status_code=404, detail=str(exc))
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc))
+
+
+@router.post("/execution/paper/trades/{trade_id}/cancel")
+def api_cancel_execution_trade(trade_id: str, payload: ExecutionCancelRequest, user=Depends(current_user)):
+    try:
+        return cancel_execution_trade(user["id"], trade_id, payload.event_id)
+    except LookupError as exc:
+        raise HTTPException(status_code=404, detail=str(exc))
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc))
+
+
+@router.get("/execution/paper/trades/{trade_id}/events")
+def api_execution_events(trade_id: str, limit: int = 200, user=Depends(current_user)):
+    try:
+        return {"items": list_execution_events(user["id"], trade_id, limit)}
     except LookupError as exc:
         raise HTTPException(status_code=404, detail=str(exc))
     except ValueError as exc:

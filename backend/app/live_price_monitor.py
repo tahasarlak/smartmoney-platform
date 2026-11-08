@@ -33,6 +33,11 @@ def active_symbols() -> list[str]:
         symbols.update(normalize_symbol(s).lower() for s in active_forward_symbols())
     except Exception as exc:
         log.warning("Could not load active forward-test symbols: %s", exc)
+    try:
+        from .v11_platform import active_execution_symbols
+        symbols.update(normalize_symbol(s).lower() for s in active_execution_symbols())
+    except Exception as exc:
+        log.warning("Could not load active execution symbols: %s", exc)
     return sorted(symbols)
 
 def build_stream_url(symbols: list[str]) -> str:
@@ -86,6 +91,7 @@ class LivePriceMonitor:
         self._messages_received = 0
         self._signals_updated = 0
         self._forward_events_processed = 0
+        self._execution_events_processed = 0
         self._connected = False
         self._symbols: list[str] = []
         self._initialized = False
@@ -177,6 +183,7 @@ class LivePriceMonitor:
                 "messages_received": self._messages_received,
                 "signals_updated": self._signals_updated,
                 "forward_events_processed": self._forward_events_processed,
+                "execution_events_processed": self._execution_events_processed,
                 "cached_prices": len(self._prices),
                 "last_message_at": self._last_message_at,
                 "last_error": self._last_error, "execution_allowed": False}
@@ -236,6 +243,16 @@ class LivePriceMonitor:
                         except Exception as exc:
                             log.exception("Forward-test tick processing failed: %s", exc)
                             self._last_error = f"Forward testing: {type(exc).__name__}: {exc}"
+                        # Phase 9 paper executions consume the same accepted, monotonic
+                        # public Binance tick before research signals are updated.
+                        try:
+                            from .v11_platform import process_active_execution_market_event
+                            self._execution_events_processed += await asyncio.to_thread(
+                                process_active_execution_market_event, event
+                            )
+                        except Exception as exc:
+                            log.exception("Paper-execution tick processing failed: %s", exc)
+                            self._last_error = f"Paper execution: {type(exc).__name__}: {exc}"
                         self._signals_updated += await asyncio.to_thread(apply_trade_event, event)
                         if time.monotonic() - last_refresh >= self.refresh_symbols_seconds: break
             except asyncio.CancelledError:

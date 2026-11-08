@@ -1,4 +1,4 @@
-name: SmartMoney V11 - PostgreSQL Phase 3 Integration
+name: SmartMoney V11 - PostgreSQL Integration
 
 on:
   push:
@@ -19,7 +19,7 @@ permissions:
   contents: read
 
 concurrency:
-  group: smartmoney-postgres-phase3
+  group: smartmoney-postgres-integration
   cancel-in-progress: false
 
 jobs:
@@ -80,7 +80,7 @@ jobs:
         run: |
           python -m compileall -q app tests
           python - <<'PY'
-          from app import database, db_models, v11_platform, market_store, signal_journal, forward_testing
+          from app import database, db_models, v11_platform, market_store, signal_journal, forward_testing, execution_engine
           from app.live_price_monitor import LivePriceMonitor
           print("PYTHON SYNTAX AND IMPORTS PASSED")
           PY
@@ -165,7 +165,7 @@ jobs:
               "market_prices", "market_watchlist", "signals",
               "signal_events", "alembic_version",
               "v11_forward_test_runs", "v11_forward_test_trades",
-              "v11_forward_test_events",
+              "v11_forward_test_events", "v11_execution_trades", "v11_execution_events",
           }
 
           with psycopg.connect(dsn, connect_timeout=30, sslmode="require") as conn:
@@ -196,8 +196,60 @@ jobs:
 
                   cur.execute("SELECT version_num FROM alembic_version")
                   revisions = [row[0] for row in cur.fetchall()]
-                  if revisions != ["0002_phase7_forward_testing"]:
+                  if revisions != ["0003_phase9_paper_execution"]:
                       raise SystemExit(f"Unexpected Alembic revision state: {revisions}")
+
+                  cur.execute("""
+                      SELECT column_name
+                      FROM information_schema.columns
+                      WHERE table_schema='public' AND table_name='v11_execution_trades'
+                  """)
+                  execution_columns = {row[0] for row in cur.fetchall()}
+                  required_execution_columns = {
+                      "user_id", "portfolio_id", "account_id", "idempotency_key",
+                      "symbol", "side", "status", "planned_entry", "avg_entry_price",
+                      "stop_loss", "tp1", "tp2", "tp3", "quantity", "remaining_quantity",
+                      "tp1_hit", "tp2_hit", "tp3_hit", "realized_pnl", "fees_paid",
+                      "last_event_time_ms", "last_event_id",
+                  }
+                  missing_execution_columns = required_execution_columns - execution_columns
+                  if missing_execution_columns:
+                      raise SystemExit("Missing execution columns: " + ", ".join(sorted(missing_execution_columns)))
+
+                  cur.execute("""
+                      SELECT constraint_name
+                      FROM information_schema.table_constraints
+                      WHERE table_schema='public' AND table_name='v11_execution_trades'
+                        AND constraint_type='UNIQUE'
+                  """)
+                  unique_constraints = {row[0] for row in cur.fetchall()}
+                  if "uq_execution_user_idempotency" not in unique_constraints:
+                      raise SystemExit("Execution idempotency unique constraint is missing")
+
+                  cur.execute("""
+                      SELECT column_name
+                      FROM information_schema.columns
+                      WHERE table_schema='public' AND table_name='v11_execution_events'
+                  """)
+                  execution_event_columns = {row[0] for row in cur.fetchall()}
+                  required_event_columns = {
+                      "trade_id", "source_event_id", "sequence_no", "event_type",
+                      "market_price", "fill_price", "quantity", "pnl", "fee",
+                      "event_time_ms", "event_time", "details_json",
+                  }
+                  missing_event_columns = required_event_columns - execution_event_columns
+                  if missing_event_columns:
+                      raise SystemExit("Missing execution-event columns: " + ", ".join(sorted(missing_event_columns)))
+
+                  cur.execute("""
+                      SELECT constraint_name
+                      FROM information_schema.table_constraints
+                      WHERE table_schema='public' AND table_name='v11_execution_events'
+                        AND constraint_type='UNIQUE'
+                  """)
+                  event_unique_constraints = {row[0] for row in cur.fetchall()}
+                  if "uq_execution_event_source_sequence" not in event_unique_constraints:
+                      raise SystemExit("Execution event idempotency constraint is missing")
 
                   cur.execute("""
                       SELECT column_name
@@ -215,5 +267,5 @@ jobs:
                   if missing_forward_columns:
                       raise SystemExit("Missing forward-test columns: " + ", ".join(sorted(missing_forward_columns)))
 
-          print("POSTGRESQL PHASE 7 FORWARD-TEST SCHEMA VERIFICATION PASSED")
+          print("POSTGRESQL PHASE 9 EXECUTION SCHEMA VERIFICATION PASSED")
           PY

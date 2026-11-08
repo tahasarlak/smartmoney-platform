@@ -51,3 +51,8 @@ test_neon_connection.py
 
 # Phase 8 local installer backups
 .phase8-backups/
+
+# Local phase installer backups
+.phase5-backups/
+.phase6-backups/
+.phase9-backups/
