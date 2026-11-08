@@ -41,6 +41,7 @@ from .v11_platform import router as v11_router
 from .live_strategy_router import router as live_strategy_router
 from .live_signal_monitor import live_signal_monitor
 from .paper_automation_router import router as paper_automation_router
+from .phase12_router import router as phase12_router
 from .operational_resilience import build_operational_health
 
 
@@ -67,6 +68,7 @@ app.add_middleware(CORSMiddleware, allow_origins=settings.api_cors_origins.split
 app.include_router(v11_router)
 app.include_router(live_strategy_router)
 app.include_router(paper_automation_router)
+app.include_router(phase12_router)
 _current_settings = SettingsIn()
 
 v8_service = V8IntelligenceService(
@@ -682,6 +684,7 @@ async def v8_start(payload: V8StartRequest):
 @app.post("/api/v1/intelligence/v8/stop")
 async def v8_stop():
     return await v8_service.stop()
+
 
 
 
