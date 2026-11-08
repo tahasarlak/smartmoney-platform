@@ -3,6 +3,7 @@ from __future__ import annotations
 from typing import Any
 
 from .market_regime import analyze_market_regime
+from .market_regime_intelligence import analyze_market_regime_intelligence
 from .scanner import TIMEFRAMES, scan_symbol
 from .smc import analyze_smc
 from .v8_engine import _make_plan
@@ -66,6 +67,10 @@ def generate_historical_smc_signals(
     allow_counter_trend: bool = False,
     max_signals: int = 500,
     history_limit: int = 500,
+    use_regime_filter: bool = False,
+    reject_transition_regime: bool = True,
+    require_trend_alignment: bool = True,
+    reject_high_volatility: bool = False,
 ) -> dict[str, Any]:
     """Generate causal, research-only SMC signals from multi-timeframe OHLC data.
 
@@ -109,7 +114,9 @@ def generate_historical_smc_signals(
         "no_confirmed_setup": 0,
         "invalid_plan": 0,
         "duplicate_zone": 0,
+        "regime_filter": 0,
     }
+    regime_observations: dict[str, int] = {}
     seen_zones: set[tuple[str, str, str]] = set()
 
     # The final 5m row has no following candle, so it cannot be replayed by
@@ -138,6 +145,11 @@ def generate_historical_smc_signals(
             tf: analyze_market_regime(windows[tf], tf)
             for tf in TIMEFRAMES
         }
+        aggregate_regime = analyze_market_regime_intelligence(
+            {tf: windows[tf] for tf in ("4h", "1h", "15m", "5m")}
+        )
+        regime_name = str(aggregate_regime["aggregate_regime"])
+        regime_observations[regime_name] = regime_observations.get(regime_name, 0) + 1
         scan = scan_symbol(
             normalized_symbol,
             windows,
@@ -161,8 +173,24 @@ def generate_historical_smc_signals(
             continue
 
         for scenario in candidates:
-            zone = scenario["zone"]
             direction = str(scenario.get("direction", ""))
+            if use_regime_filter:
+                policy_reject = (
+                    (reject_transition_regime and regime_name in {"transition", "mixed_trend"})
+                    or (
+                        require_trend_alignment
+                        and regime_name == "trending"
+                        and aggregate_regime["dominant_direction"] not in {"neutral", direction}
+                    )
+                    or (
+                        reject_high_volatility
+                        and aggregate_regime["volatility_state"] == "high_volatility"
+                    )
+                )
+                if policy_reject:
+                    rejected["regime_filter"] += 1
+                    continue
+            zone = scenario["zone"]
             zone_key = (
                 direction,
                 str(zone.get("formed_at")),
@@ -194,17 +222,40 @@ def generate_historical_smc_signals(
                 rejected["invalid_plan"] += 1
                 continue
 
+            # Preserve all plan targets for the partial-exit simulator.
+            # Fractions are deterministic defaults, not optimized parameters.
+            target_prices = [float(item["price"]) for item in targets[:3]]
+            if len(target_prices) >= 3:
+                target_fractions = [0.50, 0.30, 0.20]
+            elif len(target_prices) == 2:
+                target_fractions = [0.50, 0.50]
+            else:
+                target_prices = [take_profit]
+                target_fractions = [1.0]
+            take_profit_levels = [
+                {"price": price, "fraction": fraction}
+                for price, fraction in zip(target_prices, target_fractions)
+            ]
+
             signals.append({
                 "symbol": normalized_symbol,
                 "index": decision_index,
                 "direction": direction,
                 "stop_loss": stop_loss,
                 "take_profit": take_profit,
+                "take_profits": take_profit_levels,
+                "break_even_after_tp1": True,
                 "entry_reference": entry_reference,
                 "quality_score": int(scenario["quality_score"]),
                 "minimum_rr": float(min_rr),
                 "risk_percent_setting": float(risk_percent),
                 "signal_time": decision_time,
+                "market_regime": {
+                    "aggregate_regime": regime_name,
+                    "dominant_direction": aggregate_regime["dominant_direction"],
+                    "volatility_state": aggregate_regime["volatility_state"],
+                    "trend_alignment_count": aggregate_regime["trend_alignment_count"],
+                },
                 "zone": {
                     "type": zone.get("type"),
                     "low": float(zone["low"]),
@@ -230,6 +281,13 @@ def generate_historical_smc_signals(
         "signal_count": len(signals),
         "signals": signals,
         "rejected_counts": rejected,
+        "market_regime_summary": regime_observations,
+        "regime_filter": {
+            "enabled": use_regime_filter,
+            "reject_transition_regime": reject_transition_regime,
+            "require_trend_alignment": require_trend_alignment,
+            "reject_high_volatility": reject_high_volatility,
+        },
         "estimated_win_probability": None,
         "probability_status": "not_estimated_requires_out_of_sample_calibration",
         "lookahead_policy": {

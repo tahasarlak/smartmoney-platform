@@ -98,10 +98,35 @@ def run_multi_symbol_backtest(
             raise ValueError("Stop, target and quantity must be finite and positive")
         entry_index = idx + 1
         entry_time = times_by_symbol[symbol][entry_index]
+        raw_levels = raw.get("take_profits")
+        partial_levels: list[dict[str, float]] = []
+        if raw_levels is not None:
+            if not isinstance(raw_levels, list) or not raw_levels:
+                raise ValueError("take_profits must be a non-empty list")
+            total_fraction = 0.0
+            previous = None
+            for level in raw_levels:
+                try:
+                    price, fraction = float(level["price"]), float(level["fraction"])
+                except (KeyError, TypeError, ValueError, OverflowError) as exc:
+                    raise ValueError("Each take-profit level needs price and fraction") from exc
+                if not math.isfinite(price) or price <= 0 or not math.isfinite(fraction) or not 0 < fraction <= 1:
+                    raise ValueError("Invalid take-profit price or fraction")
+                if direction == "bullish":
+                    valid = price > stop and (previous is None or price > previous)
+                else:
+                    valid = price < stop and (previous is None or price < previous)
+                if not valid:
+                    raise ValueError("Take-profit levels must be ordered beyond stop")
+                partial_levels.append({"price": price, "fraction": fraction})
+                total_fraction += fraction
+                previous = price
+            if not math.isclose(total_fraction, 1.0, abs_tol=1e-6):
+                raise ValueError("Take-profit fractions must sum to 1.0")
         entries_by_time.setdefault(entry_time, []).append({
             "symbol": symbol, "signal_index": idx, "entry_index": entry_index,
             "direction": direction, "stop_loss": stop, "take_profit": target,
-            "quantity": qty, "_order": order,
+            "take_profits": partial_levels, "quantity": qty, "_order": order,
         })
 
     bars_by_time: dict[int, dict[str, tuple[int, dict[str, Any]]]] = {}
@@ -129,28 +154,77 @@ def run_multi_symbol_backtest(
         for pos in active:
             price = prices.get(pos["symbol"], pos["entry"])
             side = 1.0 if pos["direction"] == "bullish" else -1.0
-            unrealized += (price - pos["entry"]) * pos["quantity"] * side
+            remaining_qty = pos.get("remaining_quantity", pos["quantity"])
+            unrealized += (price - pos["entry"]) * remaining_qty * side
         return cash + unrealized
 
     def close_position(pos: dict[str, Any], candle: dict[str, Any], idx: int,
                        raw_exit: float, reason: str) -> None:
+        """Close remaining size and record one aggregate trade after all exit legs."""
         nonlocal cash
         long_side = pos["direction"] == "bullish"
+        qty = float(pos.get("remaining_quantity", pos["quantity"]))
+        if qty <= 1e-12:
+            return
         exit_price = raw_exit - slippage - spread / 2 if long_side else raw_exit + slippage + spread / 2
-        gross = (exit_price - pos["entry"]) * pos["quantity"] * (1 if long_side else -1)
-        fees = (pos["entry"] + exit_price) * pos["quantity"] * commission_pct / 100
+        gross = (exit_price - pos["entry"]) * qty * (1 if long_side else -1)
+        fees = (pos["entry"] + exit_price) * qty * commission_pct / 100
         net = gross - fees
-        risk_cash = abs(pos["entry"] - pos["stop_loss"]) * pos["quantity"]
         cash += net
+        pos["_gross"] += gross
+        pos["_fees"] += fees
+        pos["_net"] += net
+        pos["remaining_quantity"] = max(0.0, qty - qty)
+        pos.setdefault("partial_exits", []).append({
+            "index": idx, "time": int(candle["time"]), "price": round(exit_price, 10),
+            "quantity": round(qty, 10), "reason": reason,
+            "gross_pnl": round(gross, 8), "fees": round(fees, 8), "net_pnl": round(net, 8),
+        })
+        initial_risk = abs(pos["entry"] - pos["initial_stop_loss"]) * pos["quantity"]
         trades.append({
             **{k: v for k, v in pos.items() if not k.startswith("_")},
             "exit_index": idx, "exit_time": int(candle["time"]),
             "exit": round(exit_price, 10), "exit_reason": reason,
-            "gross_pnl": round(gross, 8), "fees": round(fees, 8),
-            "net_pnl": round(net, 8),
-            "r_multiple": round(net / risk_cash, 6) if risk_cash else 0.0,
+            "gross_pnl": round(pos["_gross"], 8), "fees": round(pos["_fees"], 8),
+            "net_pnl": round(pos["_net"], 8),
+            "r_multiple": round(pos["_net"] / initial_risk, 6) if initial_risk else 0.0,
             "equity_after": round(cash, 8),
         })
+
+    def close_partial(pos: dict[str, Any], candle: dict[str, Any], idx: int,
+                      raw_exit: float, qty: float, level_index: int) -> None:
+        """Realize a TP slice; BE stop becomes active on the next candle."""
+        nonlocal cash
+        long_side = pos["direction"] == "bullish"
+        qty = min(float(qty), float(pos["remaining_quantity"]))
+        exit_price = raw_exit - slippage - spread / 2 if long_side else raw_exit + slippage + spread / 2
+        gross = (exit_price - pos["entry"]) * qty * (1 if long_side else -1)
+        fees = (pos["entry"] + exit_price) * qty * commission_pct / 100
+        net = gross - fees
+        cash += net
+        pos["_gross"] += gross
+        pos["_fees"] += fees
+        pos["_net"] += net
+        pos["remaining_quantity"] = max(0.0, pos["remaining_quantity"] - qty)
+        pos.setdefault("partial_exits", []).append({
+            "index": idx, "time": int(candle["time"]), "price": round(exit_price, 10),
+            "quantity": round(qty, 10), "reason": f"take_profit_{level_index + 1}",
+            "gross_pnl": round(gross, 8), "fees": round(fees, 8), "net_pnl": round(net, 8),
+        })
+        pos["_next_tp"] += 1
+        if level_index == 0 and pos["break_even_after_tp1"]:
+            pos["stop_loss"] = pos["entry"]
+        if pos["remaining_quantity"] <= 1e-12:
+            initial_risk = abs(pos["entry"] - pos["initial_stop_loss"]) * pos["quantity"]
+            trades.append({
+                **{k: v for k, v in pos.items() if not k.startswith("_")},
+                "exit_index": idx, "exit_time": int(candle["time"]),
+                "exit": round(exit_price, 10), "exit_reason": f"take_profit_{level_index + 1}",
+                "gross_pnl": round(pos["_gross"], 8), "fees": round(pos["_fees"], 8),
+                "net_pnl": round(pos["_net"], 8),
+                "r_multiple": round(pos["_net"] / initial_risk, 6) if initial_risk else 0.0,
+                "equity_after": round(cash, 8),
+            })
 
     for ts in timeline:
         bars = bars_by_time[ts]
@@ -170,13 +244,27 @@ def run_multi_symbol_backtest(
             idx, candle = current
             long_side = pos["direction"] == "bullish"
             stop_hit = float(candle["low"]) <= pos["stop_loss"] if long_side else float(candle["high"]) >= pos["stop_loss"]
-            target_hit = float(candle["high"]) >= pos["take_profit"] if long_side else float(candle["low"]) <= pos["take_profit"]
+            levels = pos.get("take_profits") or []
             if stop_hit:
                 close_position(pos, candle, idx, pos["stop_loss"], "stop_loss")
                 active.remove(pos)
-            elif target_hit:
-                close_position(pos, candle, idx, pos["take_profit"], "take_profit")
-                active.remove(pos)
+            elif levels:
+                level_index = pos["_next_tp"]
+                if level_index < len(levels):
+                    level = levels[level_index]
+                    hit = float(candle["high"]) >= level["price"] if long_side else float(candle["low"]) <= level["price"]
+                    if hit:
+                        qty = pos["quantity"] * level["fraction"]
+                        if level_index == len(levels) - 1:
+                            qty = pos["remaining_quantity"]
+                        close_partial(pos, candle, idx, level["price"], qty, level_index)
+                        if pos["remaining_quantity"] <= 1e-12:
+                            active.remove(pos)
+            else:
+                target_hit = float(candle["high"]) >= pos["take_profit"] if long_side else float(candle["low"]) <= pos["take_profit"]
+                if target_hit:
+                    close_position(pos, candle, idx, pos["take_profit"], "take_profit")
+                    active.remove(pos)
 
         # At the timestamp open, value existing positions with current opens
         # where available and last known closes for all other symbols.
@@ -217,16 +305,29 @@ def run_multi_symbol_backtest(
                 rejected.append({"signal_index": sig["signal_index"], "symbol": sig["symbol"], "reason": "invalid_levels_at_entry"})
                 continue
             pos = {k: v for k, v in sig.items() if not k.startswith("_")}
-            pos.update({"entry_time": ts, "entry": entry})
+            pos.update({
+                "entry_time": ts, "entry": entry, "initial_stop_loss": stop,
+                "remaining_quantity": qty, "take_profits": sig.get("take_profits") or [],
+                "break_even_after_tp1": bool(sig.get("break_even_after_tp1", True)),
+                "_next_tp": 0, "_gross": 0.0, "_fees": 0.0, "_net": 0.0,
+            })
             active.append(pos)
 
             # Newly opened positions are exposed to the remainder of this OHLC bar.
             idx, candle = bars[sig["symbol"]]
             stop_hit = float(candle["low"]) <= stop if long_side else float(candle["high"]) >= stop
+            levels = pos.get("take_profits") or []
             target_hit = float(candle["high"]) >= target if long_side else float(candle["low"]) <= target
             if stop_hit:
                 close_position(pos, candle, idx, stop, "stop_loss")
                 active.remove(pos)
+            elif levels:
+                first = levels[0]
+                first_hit = float(candle["high"]) >= first["price"] if long_side else float(candle["low"]) <= first["price"]
+                if first_hit:
+                    close_partial(pos, candle, idx, first["price"], qty * first["fraction"], 0)
+                    if pos["remaining_quantity"] <= 1e-12:
+                        active.remove(pos)
             elif target_hit:
                 close_position(pos, candle, idx, target, "take_profit")
                 active.remove(pos)
@@ -301,6 +402,7 @@ def run_multi_symbol_backtest(
             "commission_pct": commission_pct, "spread_price_units": spread,
             "slippage_price_units": slippage,
             "capital_model": "shared equity; no broker-specific margin, leverage, contract multiplier, or notional reservation model",
+            "partial_take_profit": "one TP level maximum per OHLC candle; stop is checked first; break-even applies from the candle after TP1",
         },
         "estimated_win_probability": None,
         "execution_allowed": False,

@@ -24,6 +24,11 @@ def run_historical_smc_portfolio_backtest(
     max_daily_loss_pct: float = 3.0,
     max_weekly_loss_pct: float = 6.0,
     max_drawdown_pct: float = 15.0,
+    use_regime_filter: bool = False,
+    reject_transition_regime: bool = True,
+    require_trend_alignment: bool = True,
+    reject_high_volatility: bool = False,
+    signal_time_start: int | None = None,
 ) -> dict[str, Any]:
     """Generate causal SMC signals per symbol and replay them in one portfolio.
 
@@ -69,6 +74,10 @@ def run_historical_smc_portfolio_backtest(
             allow_counter_trend=allow_counter_trend,
             max_signals=max_signals_per_symbol,
             history_limit=history_limit,
+            use_regime_filter=use_regime_filter,
+            reject_transition_regime=reject_transition_regime,
+            require_trend_alignment=require_trend_alignment,
+            reject_high_volatility=reject_high_volatility,
         )
         if result.get("status") != "completed":
             raise ValueError(f"Historical signal generation failed for {symbol}")
@@ -79,6 +88,8 @@ def run_historical_smc_portfolio_backtest(
         generated[symbol] = result
 
         for raw_signal in result.get("signals", []):
+            if signal_time_start is not None and int(raw_signal.get("signal_time", -1)) < signal_time_start:
+                continue
             signal = dict(raw_signal)
             if signal.get("execution_allowed") is not False:
                 raise ValueError("Historical research signals must not allow execution")
@@ -125,6 +136,13 @@ def run_historical_smc_portfolio_backtest(
         "signal_source": "historical_smc_engine",
         "methodology_version": "historical-smc-1.0",
         "generated_signal_count": len(all_signals),
+        "signal_time_start": signal_time_start,
+        "regime_filter": {
+            "enabled": use_regime_filter,
+            "reject_transition_regime": reject_transition_regime,
+            "require_trend_alignment": require_trend_alignment,
+            "reject_high_volatility": reject_high_volatility,
+        },
         "generated_signals_by_symbol": {
             symbol: result["signal_count"] for symbol, result in generated.items()
         },
