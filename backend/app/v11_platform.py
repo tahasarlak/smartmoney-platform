@@ -1869,3 +1869,151 @@ def api_phase20_release_audit(portfolio_id: str, limit: int = 500, user=Depends(
 
 # ===== END TRADF PHASES 16-20 =====
 
+
+
+# ===== TRADF PHASES 21-25: paper operations, adaptive risk and reliability =====
+from pydantic import BaseModel as _Phase2125BaseModel, Field as _Phase2125Field
+from .phase21_paper_control import build_paper_control_report as _phase21_paper_control
+from .phase22_execution_controls import build_execution_preflight as _phase22_preflight
+from .phase23_adaptive_risk import recommend_adaptive_risk as _phase23_adaptive_risk
+from .phase24_realtime_intelligence import build_trade_alerts as _phase24_alerts
+from .phase25_reliability import build_reliability_report as _phase25_reliability
+
+
+def _phase2125_context(user_id: str, portfolio_id: str, limit: int = 500):
+    portfolio = get_portfolio(user_id, portfolio_id)
+    trades = list_execution_trades(user_id, portfolio_id, status=None, limit=limit)
+    trade_ids = [trade["id"] for trade in trades]
+    events_by_trade: dict[str, list[dict[str, Any]]] = {trade_id: [] for trade_id in trade_ids}
+    if trade_ids:
+        db = _session()
+        try:
+            rows = db.scalars(
+                select(ExecutionEvent)
+                .where(ExecutionEvent.trade_id.in_(trade_ids))
+                .order_by(ExecutionEvent.event_time_ms.asc(), ExecutionEvent.id.asc())
+                .limit(10000)
+            ).all()
+            for row in rows:
+                events_by_trade[row.trade_id].append({
+                    "id": row.id, "source_event_id": row.source_event_id,
+                    "sequence_no": row.sequence_no, "event_type": row.event_type,
+                    "event_time_ms": row.event_time_ms, "pnl": row.pnl, "fee": row.fee,
+                })
+        finally:
+            db.close()
+    return portfolio, trades, events_by_trade
+
+class _Phase22PreflightRequest(_Phase2125BaseModel):
+    side: str = _Phase2125Field(pattern="^(long|short)$")
+    quantity: float = _Phase2125Field(gt=0, le=1_000_000_000)
+    entry: float = _Phase2125Field(gt=0)
+    stop_loss: float = _Phase2125Field(gt=0)
+
+
+class _Phase23AdaptiveRiskRequest(_Phase2125BaseModel):
+    baseline_risk_pct: float = _Phase2125Field(default=0.25, gt=0, le=5)
+    max_risk_pct: float = _Phase2125Field(default=0.5, gt=0, le=5)
+    volatility_multiple: float = _Phase2125Field(default=1.0, gt=0, le=20)
+    drawdown_pct: float = _Phase2125Field(default=0.0, ge=0, le=100)
+    market_regime: str = "unknown"
+
+
+@router.get("/portfolios/{portfolio_id}/paper-control")
+def api_phase21_paper_control(portfolio_id: str, limit: int = 500, user=Depends(current_user)):
+    if not 1 <= limit <= 500:
+        raise HTTPException(status_code=422, detail="limit must be between 1 and 500")
+    try:
+        portfolio, trades, events = _phase2125_context(user["id"], portfolio_id, limit)
+        result = _phase21_paper_control(trades=trades, events_by_trade=events)
+        result.update({"portfolio_id": portfolio_id, "portfolio_name": portfolio["name"],
+                       "trades_returned": len(trades), "truncated": len(trades) >= limit})
+        return result
+    except LookupError as exc:
+        raise HTTPException(status_code=404, detail=str(exc))
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc))
+
+
+@router.post("/portfolios/{portfolio_id}/execution-preflight")
+def api_phase22_execution_preflight(portfolio_id: str, payload: _Phase22PreflightRequest,
+                                    user=Depends(current_user)):
+    try:
+        portfolio, trades, _ = _phase2125_context(user["id"], portfolio_id, 500)
+        result = _phase22_preflight(portfolio=portfolio, trades=trades, side=payload.side,
+                                    quantity=payload.quantity, entry=payload.entry,
+                                    stop_loss=payload.stop_loss)
+        result["portfolio_id"] = portfolio_id
+        return result
+    except LookupError as exc:
+        raise HTTPException(status_code=404, detail=str(exc))
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc))
+
+
+@router.post("/portfolios/{portfolio_id}/adaptive-risk")
+def api_phase23_adaptive_risk(portfolio_id: str, payload: _Phase23AdaptiveRiskRequest,
+                              user=Depends(current_user)):
+    try:
+        portfolio = get_portfolio(user["id"], portfolio_id)
+        result = _phase23_adaptive_risk(
+            baseline_risk_pct=payload.baseline_risk_pct,
+            max_risk_pct=min(payload.max_risk_pct, float(portfolio["max_trade_risk_pct"])),
+            volatility_multiple=payload.volatility_multiple,
+            drawdown_pct=payload.drawdown_pct,
+            market_regime=payload.market_regime,
+        )
+        result["portfolio_id"] = portfolio_id
+        result["portfolio_max_trade_risk_pct"] = portfolio["max_trade_risk_pct"]
+        return result
+    except LookupError as exc:
+        raise HTTPException(status_code=404, detail=str(exc))
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc))
+
+
+@router.get("/portfolios/{portfolio_id}/intelligence-alerts")
+def api_phase24_intelligence_alerts(portfolio_id: str, limit: int = 500,
+                                    stale_after_seconds: int = 180, user=Depends(current_user)):
+    if not 1 <= limit <= 500 or not 1 <= stale_after_seconds <= 86400:
+        raise HTTPException(status_code=422, detail="Invalid limit or stale_after_seconds")
+    try:
+        portfolio, trades, _ = _phase2125_context(user["id"], portfolio_id, limit)
+        result = _phase24_alerts(trades=trades,
+                                 now_ms=int(_now().timestamp() * 1000),
+                                 stale_after_seconds=stale_after_seconds)
+        result.update({"portfolio_id": portfolio_id, "portfolio_name": portfolio["name"]})
+        return result
+    except LookupError as exc:
+        raise HTTPException(status_code=404, detail=str(exc))
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc))
+
+
+@router.get("/portfolios/{portfolio_id}/reliability")
+def api_phase25_reliability(portfolio_id: str, limit: int = 500, user=Depends(current_user)):
+    if not 1 <= limit <= 500:
+        raise HTTPException(status_code=422, detail="limit must be between 1 and 500")
+    database_ok = False
+    try:
+        portfolio, trades, events = _phase2125_context(user["id"], portfolio_id, limit)
+        db = _session()
+        try:
+            db.execute(select(1))
+            database_ok = True
+        finally:
+            db.close()
+        control = _phase21_paper_control(trades=trades, events_by_trade=events)
+        alerts = _phase24_alerts(trades=trades, now_ms=int(_now().timestamp() * 1000))
+        result = _phase25_reliability(database_probe_ok=database_ok, trades=trades,
+                                      paper_control=control, alerts=alerts)
+        result.update({"portfolio_id": portfolio_id, "portfolio_name": portfolio["name"],
+                       "trades_returned": len(trades), "truncated": len(trades) >= limit})
+        return result
+    except LookupError as exc:
+        raise HTTPException(status_code=404, detail=str(exc))
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc))
+
+# ===== END TRADF PHASES 21-25 =====
+
