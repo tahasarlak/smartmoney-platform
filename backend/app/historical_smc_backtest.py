@@ -29,6 +29,7 @@ def run_historical_smc_portfolio_backtest(
     require_trend_alignment: bool = True,
     reject_high_volatility: bool = False,
     signal_time_start: int | None = None,
+    signal_time_end: int | None = None,
 ) -> dict[str, Any]:
     """Generate causal SMC signals per symbol and replay them in one portfolio.
 
@@ -50,6 +51,9 @@ def run_historical_smc_portfolio_backtest(
         raise ValueError("initial_equity must be finite and positive")
     if not math.isfinite(risk_percent) or not 0 < risk_percent <= 2:
         raise ValueError("risk_percent must be greater than 0 and at most 2")
+
+    if signal_time_start is not None and signal_time_end is not None and signal_time_end <= signal_time_start:
+        raise ValueError("signal_time_end must be greater than signal_time_start")
 
     normalized: dict[str, dict[str, list[dict[str, Any]]]] = {}
     candles_5m: dict[str, list[dict[str, Any]]] = {}
@@ -83,12 +87,21 @@ def run_historical_smc_portfolio_backtest(
             raise ValueError(f"Historical signal generation failed for {symbol}")
 
         rows_5m = tf_data["5m"]
-        candles_5m[symbol] = rows_5m
+        replay_rows = (
+            [row for row in rows_5m if int(row["time"]) < signal_time_end]
+            if signal_time_end is not None else rows_5m
+        )
+        if len(replay_rows) < 2:
+            raise ValueError(f"Insufficient 5m candles inside replay window for {symbol}")
+        candles_5m[symbol] = replay_rows
         normalized[symbol] = tf_data
         generated[symbol] = result
 
         for raw_signal in result.get("signals", []):
-            if signal_time_start is not None and int(raw_signal.get("signal_time", -1)) < signal_time_start:
+            signal_time = int(raw_signal.get("signal_time", -1))
+            if signal_time_start is not None and signal_time < signal_time_start:
+                continue
+            if signal_time_end is not None and signal_time >= signal_time_end:
                 continue
             signal = dict(raw_signal)
             if signal.get("execution_allowed") is not False:
@@ -137,6 +150,7 @@ def run_historical_smc_portfolio_backtest(
         "methodology_version": "historical-smc-1.0",
         "generated_signal_count": len(all_signals),
         "signal_time_start": signal_time_start,
+        "signal_time_end": signal_time_end,
         "regime_filter": {
             "enabled": use_regime_filter,
             "reject_transition_regime": reject_transition_regime,
