@@ -40,3 +40,30 @@ This bundle is a targeted Phase 3 integration pass based on the uploaded reposit
 ## Important scope boundary
 
 This bundle does not enable live trading and does not claim to complete every production requirement. The uploaded repository itself still documents outstanding work including rate limiting, MFA/email verification, secrets management, backup/restore drills, load/security testing, broker adapters, and full walk-forward/Monte Carlo validation. Live execution remains disabled.
+
+
+## Additional hardening applied in this completion pass
+
+7. **Same-millisecond market ticks**
+   - Ordered Binance trades can share the same millisecond timestamp. Signal updates now reject strictly older timestamps while accepting the next ordered tick at the same millisecond.
+   - Added a regression test proving a signal can move from OPEN to TP1_HIT when both ticks share one timestamp.
+
+
+8. **Non-blocking live monitor database work**
+   - Startup preload, active-symbol discovery, market-price persistence, and signal updates are moved off the asyncio event loop using `asyncio.to_thread`.
+   - Initialization is guarded by a thread lock to prevent concurrent duplicate preloads.
+   - Status and market snapshot use the monitor's local cache and do not issue database queries on every health/status poll.
+
+9. **Accurate monitor metrics**
+   - `signals_updated` now increments only when a signal's status or recorded price actually changes, rather than counting every matching active signal returned by the journal.
+
+
+## Repository review and completion-pass validation
+
+The completion pass was checked against the uploaded repository snapshot.
+
+- No `sqlite3` or `sqlite://` references remain in `backend/app`.
+- PostgreSQL remains the only persistence layer for V11 users, portfolios, paper orders, signals, watchlist, and market prices.
+- No database migration was added because this pass does not change the SQLAlchemy table schema.
+- Added regression coverage for same-millisecond ordered ticks, monitor cache behavior, actual signal-update metrics, database readiness, and watchlist cache consistency after a failed database write.
+- The focused offline suite (`test_phase3_hardening.py` and `test_live_price_monitor_v7.py`) passes locally. Neon-backed integration tests must still run in GitHub Actions because the database credentials are GitHub Environment secrets.

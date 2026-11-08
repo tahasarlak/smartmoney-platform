@@ -32,12 +32,13 @@ def test_watchlist_and_prices_persist_across_store_calls():
         assert symbol in add_watchlist_symbol(symbol)
         assert symbol in list_watchlist()
 
-        upsert_market_price({
+        accepted = upsert_market_price({
             "symbol": symbol,
             "price": 100.5,
             "event_time": "2026-01-01T00:00:00+00:00",
             "event_time_ms": 1767225600000,
         })
+        assert accepted is True
 
         prices = [
             item for item in list_market_prices()
@@ -60,17 +61,19 @@ def test_stale_price_event_does_not_overwrite_newer_tick():
             "event_time": "2026-01-01T00:00:00+00:00",
         }
 
-        upsert_market_price({
+        accepted_newer = upsert_market_price({
             **base,
             "price": 101,
             "event_time_ms": 200,
         })
+        assert accepted_newer is True
 
-        upsert_market_price({
+        accepted_stale = upsert_market_price({
             **base,
             "price": 99,
             "event_time_ms": 100,
         })
+        assert accepted_stale is False
 
         prices = [
             item for item in list_market_prices()

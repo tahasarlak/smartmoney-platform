@@ -140,7 +140,10 @@ def update_signal_price(signal_id: str, price: float, timestamp: str | None = No
                 previous_time = _parse_timestamp(row.last_price_at)
             except (TypeError, ValueError):
                 previous_time = None
-            if previous_time is not None and incoming_time <= previous_time:
+            # Binance can emit multiple distinct trades within the same millisecond.
+            # WebSocket delivery is ordered, so reject strictly older ticks while
+            # allowing the next trade carrying the same millisecond timestamp.
+            if previous_time is not None and incoming_time < previous_time:
                 return _row(row)
 
         old, new, reason = row.status, row.status, None

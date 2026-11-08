@@ -1,4 +1,4 @@
-name: SmartMoney V11 - PostgreSQL Phase 2
+name: SmartMoney V11 - PostgreSQL Phase 3 Integration
 
 on:
   push:
@@ -19,7 +19,7 @@ permissions:
   contents: read
 
 concurrency:
-  group: smartmoney-postgres-phase2
+  group: smartmoney-postgres-phase3
   cancel-in-progress: false
 
 jobs:
@@ -129,6 +129,14 @@ jobs:
                       print(version.splitlines()[0])
           PY
 
+      - name: Enforce PostgreSQL-only application storage
+        run: |
+          if grep -RInE 'sqlite3|sqlite://' app; then
+            echo "SQLite references remain in the application package."
+            exit 1
+          fi
+          echo "POSTGRESQL-ONLY APPLICATION STORAGE PASSED"
+
       - name: Apply Alembic migrations
         run: alembic upgrade head
 
@@ -189,5 +197,5 @@ jobs:
                   if revisions != ["0001_initial"]:
                       raise SystemExit(f"Unexpected Alembic revision state: {revisions}")
 
-          print("POSTGRESQL PHASE 2 DATABASE VERIFICATION PASSED")
+          print("POSTGRESQL PHASE 3 DATABASE VERIFICATION PASSED")
           PY

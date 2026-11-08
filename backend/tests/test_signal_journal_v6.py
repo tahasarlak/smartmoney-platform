@@ -217,3 +217,16 @@ def test_terminal_signal_cannot_be_changed_by_later_price_update():
     assert closed["status"] == "TP3_HIT"
     assert attempted_rewrite["status"] == "TP3_HIT"
     assert attempted_rewrite["last_price"] == pytest.approx(106)
+
+
+
+def test_same_millisecond_ordered_ticks_can_advance_signal():
+    saved = journal.create_signal(plan())
+    timestamp = "2026-11-08T12:00:00.123+00:00"
+
+    opened = journal.update_signal_price(saved["id"], 99.5, timestamp)
+    target = journal.update_signal_price(saved["id"], 102, timestamp)
+
+    assert opened["status"] == "OPEN"
+    assert target["status"] == "TP1_HIT"
+    assert target["last_price"] == pytest.approx(102)

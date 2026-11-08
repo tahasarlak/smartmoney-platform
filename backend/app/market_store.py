@@ -38,7 +38,7 @@ def list_watchlist() -> list[str]:
     with get_session_factory()() as db:
         return list(db.scalars(select(MarketWatchlist.symbol).order_by(MarketWatchlist.symbol)))
 
-def upsert_market_price(event: dict[str, Any], provider: str = "binance_spot") -> None:
+def upsert_market_price(event: dict[str, Any], provider: str = "binance_spot") -> bool:
     symbol = str(event["symbol"]).strip().upper()
     price = float(event["price"])
     event_time = str(event["event_time"])
@@ -54,7 +54,10 @@ def upsert_market_price(event: dict[str, Any], provider: str = "binance_spot") -
                   "event_time_ms": stmt.excluded.event_time_ms,
                   "provider": stmt.excluded.provider, "updated_at": stmt.excluded.updated_at},
             where=stmt.excluded.event_time_ms >= MarketPrice.event_time_ms)
-        db.execute(stmt)
+        result = db.execute(stmt.returning(MarketPrice.symbol))
+        # PostgreSQL returns a row for inserts/updates. If the ON CONFLICT
+        # timestamp predicate rejects a stale tick, RETURNING yields no row.
+        return result.scalar_one_or_none() is not None
 
 def list_market_prices() -> list[dict[str, Any]]:
     with get_session_factory()() as db:

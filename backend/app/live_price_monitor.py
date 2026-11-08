@@ -1,5 +1,5 @@
 from __future__ import annotations
-import asyncio, json, logging, math, os, re, time
+import asyncio, json, logging, math, os, re, time, threading
 from typing import Any
 import websockets
 from .signal_journal import list_signals, update_signal_price
@@ -56,7 +56,16 @@ def apply_trade_event(event: dict[str, Any]) -> int:
     changed = 0
     for status in ACTIVE_STATUSES:
         for signal in list_signals(status=status, symbol=event["symbol"], limit=500, include_private=True):
-            if update_signal_price(signal["id"], event["price"], event["event_time"], include_private=True):
+            updated = update_signal_price(
+                signal["id"], event["price"], event["event_time"], include_private=True
+            )
+            if updated is None:
+                continue
+            if (
+                updated.get("status") != signal.get("status")
+                or updated.get("last_price") != signal.get("last_price")
+                or updated.get("last_price_at") != signal.get("last_price_at")
+            ):
                 changed += 1
     return changed
 
@@ -73,6 +82,7 @@ class LivePriceMonitor:
         self._connected = False
         self._symbols: list[str] = []
         self._initialized = False
+        self._init_lock = threading.Lock()
         self._watchlist: set[str] = set()
         self._prices: dict[str, dict[str, Any]] = {}
 
@@ -80,34 +90,38 @@ class LivePriceMonitor:
         """Load persisted state on demand, never during module import."""
         if self._initialized:
             return
-        init_market_store()
-        saved_watchlist = list_watchlist()
-        saved_prices = list_market_prices()
-        self._watchlist = set(saved_watchlist)
-        self._prices = {
-            item["symbol"]: {
-                "symbol": item["symbol"], "price": item["price"],
-                "event_time": item["event_time"],
-                "event_time_ms": item["event_time_ms"],
+        with self._init_lock:
+            if self._initialized:
+                return
+            init_market_store()
+            saved_watchlist = list_watchlist()
+            saved_prices = list_market_prices()
+            self._watchlist = set(saved_watchlist)
+            self._prices = {
+                item["symbol"]: {
+                    "symbol": item["symbol"], "price": item["price"],
+                    "event_time": item["event_time"],
+                    "event_time_ms": item["event_time_ms"],
+                    "updated_at": item.get("updated_at"),
+                }
+                for item in saved_prices
             }
-            for item in saved_prices
-        }
-        latest = max(saved_prices, key=lambda item: item["event_time_ms"], default=None)
-        self._last_message_at = latest["event_time"] if latest else None
-        self._initialized = True
+            latest = max(saved_prices, key=lambda item: item["event_time_ms"], default=None)
+            self._last_message_at = latest["event_time"] if latest else None
+            self._initialized = True
 
     def add_symbol(self, value: str) -> dict[str, Any]:
         self._ensure_initialized()
         symbol = normalize_symbol(value)
-        self._watchlist.add(symbol)
         add_watchlist_symbol(symbol)
+        self._watchlist.add(symbol)
         return self.watchlist_status()
 
     def remove_symbol(self, value: str) -> dict[str, Any]:
         self._ensure_initialized()
         symbol = normalize_symbol(value)
-        self._watchlist.discard(symbol)
         remove_watchlist_symbol(symbol)
+        self._watchlist.discard(symbol)
         return self.watchlist_status()
 
     def watchlist_status(self) -> dict[str, Any]:
@@ -119,16 +133,17 @@ class LivePriceMonitor:
             "execution_allowed": False,
         }
     def market_snapshot(self) -> dict[str, Any]:
-        prices = list_market_prices()
+        prices = [dict(item) for item in self._prices.values()]
         latest = max(prices, key=lambda item: item["event_time_ms"], default=None)
-        return {"prices": prices, "count": len(prices),
-                "updated_at": latest["updated_at"] if latest else None,
+        return {"prices": sorted(prices, key=lambda item: item["symbol"]),
+                "count": len(prices),
+                "updated_at": latest.get("updated_at") if latest else None,
                 "storage": "postgresql", "execution_allowed": False}
 
     async def start(self) -> dict[str, Any]:
         if self._task and not self._task.done(): return self.status()
         try:
-            self._ensure_initialized()
+            await asyncio.to_thread(self._ensure_initialized)
         except Exception as exc:
             # Keep the API process alive if PostgreSQL is temporarily unavailable.
             # The background loop will retry through its normal reconnect path.
@@ -154,15 +169,16 @@ class LivePriceMonitor:
                 "watchlist_storage": "postgresql",
                 "messages_received": self._messages_received,
                 "signals_updated": self._signals_updated,
-                "cached_prices": len(list_market_prices()),
+                "cached_prices": len(self._prices),
                 "last_message_at": self._last_message_at,
                 "last_error": self._last_error, "execution_allowed": False}
 
     async def _run(self):
         while not self._stop.is_set():
             try:
-                self._ensure_initialized()
-                symbols = sorted(set(active_symbols()) | {s.lower() for s in self._watchlist})
+                await asyncio.to_thread(self._ensure_initialized)
+                active = await asyncio.to_thread(active_symbols)
+                symbols = sorted(set(active) | {s.lower() for s in self._watchlist})
                 self._symbols = symbols
                 if not symbols:
                     self._connected = False
@@ -183,12 +199,26 @@ class LivePriceMonitor:
                         if not event: continue
                         self._messages_received += 1
                         self._last_message_at = event["event_time"]
-                        self._prices[event["symbol"]] = {
-                            "symbol": event["symbol"], "price": event["price"],
-                            "event_time": event["event_time"],
-                            "event_time_ms": event["event_time_ms"]}
-                        upsert_market_price(event, provider="binance_spot")
-                        self._signals_updated += apply_trade_event(event)
+                        accepted = await asyncio.to_thread(
+                            upsert_market_price, event, provider="binance_spot"
+                        )
+                        if not accepted:
+                            # The database rejected an older tick. Do not let the
+                            # in-memory snapshot regress behind persisted market data.
+                            continue
+
+                        current = self._prices.get(event["symbol"])
+                        if (
+                            current is None
+                            or event["event_time_ms"] >= current["event_time_ms"]
+                        ):
+                            self._prices[event["symbol"]] = {
+                                "symbol": event["symbol"], "price": event["price"],
+                                "event_time": event["event_time"],
+                                "event_time_ms": event["event_time_ms"],
+                                "updated_at": event["event_time"],
+                            }
+                        self._signals_updated += await asyncio.to_thread(apply_trade_event, event)
                         if time.monotonic() - last_refresh >= self.refresh_symbols_seconds: break
             except asyncio.CancelledError:
                 raise
