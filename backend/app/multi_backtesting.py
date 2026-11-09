@@ -307,7 +307,7 @@ def run_multi_symbol_backtest(
             pos = {k: v for k, v in sig.items() if not k.startswith("_")}
             pos.update({
                 "entry_time": ts, "entry": entry, "initial_stop_loss": stop,
-                "remaining_quantity": qty, "take_profits": sig.get("take_profits") or [],
+                "remaining_quantity": sig["quantity"], "take_profits": sig.get("take_profits") or [],
                 "break_even_after_tp1": bool(sig.get("break_even_after_tp1", True)),
                 "_next_tp": 0, "_gross": 0.0, "_fees": 0.0, "_net": 0.0,
             })
@@ -325,7 +325,7 @@ def run_multi_symbol_backtest(
                 first = levels[0]
                 first_hit = float(candle["high"]) >= first["price"] if long_side else float(candle["low"]) <= first["price"]
                 if first_hit:
-                    close_partial(pos, candle, idx, first["price"], qty * first["fraction"], 0)
+                    close_partial(pos, candle, idx, first["price"], pos["quantity"] * first["fraction"], 0)
                     if pos["remaining_quantity"] <= 1e-12:
                         active.remove(pos)
             elif target_hit:
@@ -407,3 +407,5 @@ def run_multi_symbol_backtest(
         "estimated_win_probability": None,
         "execution_allowed": False,
     }
+
+

@@ -5,10 +5,13 @@ pydantic-settings==2.8.1
 httpx==0.28.1
 pandas==2.2.3
 numpy==2.2.3
-pytest==8.3.4
+pytest>=8.4,<9
 websockets>=12,<17
 
 # Cloud PostgreSQL
 SQLAlchemy>=2.0,<3
 psycopg[binary]>=3.2,<4
 alembic>=1.14,<2
+
+cryptography>=44,<47
+

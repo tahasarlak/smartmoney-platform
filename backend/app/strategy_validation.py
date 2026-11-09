@@ -169,3 +169,260 @@ def build_strategy_validation(*, trades: list[dict[str, Any]], bootstrap_iterati
         ],
         "execution_allowed": False,
     }
+
+
+def _wf_normalize_candles(candles_by_symbol):
+    if not isinstance(candles_by_symbol, dict) or not candles_by_symbol:
+        raise ValueError("At least one symbol is required")
+    normalized, times = {}, {}
+    if len(candles_by_symbol) > 30:
+        raise ValueError("Maximum 30 symbols are supported")
+    for raw_symbol, rows in candles_by_symbol.items():
+        symbol = str(raw_symbol).strip().upper()
+        if not symbol or symbol in normalized:
+            raise ValueError(f"Invalid or duplicate symbol: {raw_symbol}")
+        if not isinstance(rows, list) or len(rows) < 3:
+            raise ValueError(f"At least 3 candles are required for {symbol}")
+        clean, stamps = [], []
+        for i, row in enumerate(rows):
+            try:
+                ts = int(row["time"])
+                o, h, lo, cl = (float(row[k]) for k in ("open", "high", "low", "close"))
+            except (KeyError, TypeError, ValueError, OverflowError) as exc:
+                raise ValueError(f"Invalid candle for {symbol} at index {i}") from exc
+            if not all(math.isfinite(x) and x > 0 for x in (o, h, lo, cl)):
+                raise ValueError(f"Invalid OHLC values for {symbol} at index {i}")
+            if not lo <= min(o, cl) <= max(o, cl) <= h:
+                raise ValueError(f"OHLC invariant violated for {symbol} at index {i}")
+            item = dict(row)
+            item.update(time=ts, open=o, high=h, low=lo, close=cl)
+            clean.append(item)
+            stamps.append(ts)
+        if stamps != sorted(stamps) or len(stamps) != len(set(stamps)):
+            raise ValueError(f"Candles for {symbol} must be strictly chronological without duplicates")
+        normalized[symbol], times[symbol] = clean, stamps
+    return normalized, times
+
+
+def _wf_fold_input(normalized, times, signals, start, end):
+    fold_candles, index_maps = {}, {}
+    for symbol, rows in normalized.items():
+        indexes = [i for i, ts in enumerate(times[symbol]) if start <= ts <= end]
+        if len(indexes) < 3:
+            continue
+        first, last = indexes[0], indexes[-1]
+        fold_candles[symbol] = rows[first:last + 1]
+        index_maps[symbol] = {old: old - first for old in range(first, last + 1)}
+
+    fold_signals = []
+    for raw in signals:
+        if not isinstance(raw, dict):
+            raise ValueError("Each signal must be an object")
+        try:
+            symbol = str(raw["symbol"]).strip().upper()
+            idx = int(raw["index"])
+        except (KeyError, TypeError, ValueError, OverflowError) as exc:
+            raise ValueError("Invalid signal symbol or index") from exc
+        if symbol not in normalized:
+            raise ValueError(f"Signal references unknown symbol: {symbol}")
+        if idx < 0 or idx >= len(normalized[symbol]) - 1:
+            raise ValueError(f"Signal index for {symbol} must have a following candle")
+        if not start <= times[symbol][idx] <= end:
+            continue
+        mapping = index_maps.get(symbol, {})
+        if idx not in mapping or idx + 1 not in mapping:
+            continue
+        item = dict(raw)
+        item["symbol"], item["index"] = symbol, mapping[idx]
+        fold_signals.append(item)
+    return fold_candles, fold_signals
+
+
+def _wf_mc(pnls, simulations, seed, initial_equity):
+    if len(pnls) < 5:
+        return {
+            "status": "insufficient_data", "trade_count": len(pnls),
+            "simulations": 0,
+            "reason": "At least 5 out-of-sample trades are required.",
+            "execution_allowed": False,
+        }
+    rng = random.Random(seed)
+    endings, drawdowns = [], []
+    for _ in range(simulations):
+        equity = peak = float(initial_equity)
+        max_dd = 0.0
+        for _ in pnls:
+            equity += pnls[rng.randrange(len(pnls))]
+            peak = max(peak, equity)
+            if peak > 0:
+                max_dd = max(max_dd, (peak - equity) / peak * 100)
+        endings.append(equity - initial_equity)
+        drawdowns.append(max_dd)
+    return {
+        "status": "completed", "trade_count": len(pnls),
+        "simulations": simulations,
+        "ending_net_pnl_p05": round(_percentile(endings, .05), 8),
+        "ending_net_pnl_median": round(_percentile(endings, .5), 8),
+        "ending_net_pnl_p95": round(_percentile(endings, .95), 8),
+        "max_drawdown_pct_p50": round(_percentile(drawdowns, .5), 8),
+        "max_drawdown_pct_p95": round(_percentile(drawdowns, .95), 8),
+        "method": "bootstrap_resampling_of_observed_oos_trade_pnls",
+        "is_forecast": False, "execution_allowed": False,
+    }
+
+
+def validate_strategy_walk_forward(
+    candles_by_symbol, signals, *, initial_equity=10000.0,
+    spread=0.0, slippage=0.0, commission_pct=0.0,
+    max_open_trades=3, max_daily_loss_pct=3.0,
+    max_weekly_loss_pct=6.0, max_drawdown_pct=15.0,
+    folds=4, monte_carlo_simulations=1000, random_seed=42,
+    stress_cost_multiplier=2.0,
+):
+    """Chronological independent-fold OOS replay; research only, never execution."""
+    from .multi_backtesting import run_multi_symbol_backtest
+
+    normalized, times = _wf_normalize_candles(candles_by_symbol)
+    if not isinstance(signals, list):
+        raise ValueError("signals must be a list")
+    if not isinstance(folds, int) or not 2 <= folds <= 10:
+        raise ValueError("folds must be between 2 and 10")
+    if not isinstance(monte_carlo_simulations, int) or not 100 <= monte_carlo_simulations <= 10000:
+        raise ValueError("monte_carlo_simulations must be between 100 and 10000")
+    if not isinstance(random_seed, int) or not 0 <= random_seed <= 2**32 - 1:
+        raise ValueError("random_seed must be an unsigned 32-bit integer")
+
+    try:
+        initial_equity, spread, slippage, commission_pct = map(
+            float, (initial_equity, spread, slippage, commission_pct)
+        )
+        stress_cost_multiplier = float(stress_cost_multiplier)
+        max_daily_loss_pct, max_weekly_loss_pct, max_drawdown_pct = map(
+            float, (max_daily_loss_pct, max_weekly_loss_pct, max_drawdown_pct)
+        )
+    except (TypeError, ValueError, OverflowError) as exc:
+        raise ValueError("Backtest configuration values must be numeric") from exc
+    if not math.isfinite(initial_equity) or initial_equity <= 0:
+        raise ValueError("initial_equity must be finite and positive")
+    for name, value in (("spread", spread), ("slippage", slippage), ("commission_pct", commission_pct)):
+        if not math.isfinite(value) or value < 0:
+            raise ValueError(f"{name} must be finite and nonnegative")
+    if commission_pct > 5:
+        raise ValueError("commission_pct cannot exceed 5")
+    for name, value in (("max_daily_loss_pct", max_daily_loss_pct),
+                        ("max_weekly_loss_pct", max_weekly_loss_pct),
+                        ("max_drawdown_pct", max_drawdown_pct)):
+        if not math.isfinite(value) or not 0 <= value <= 100:
+            raise ValueError(f"{name} must be between 0 and 100")
+    if not math.isfinite(stress_cost_multiplier) or not 1 <= stress_cost_multiplier <= 10:
+        raise ValueError("stress_cost_multiplier must be between 1 and 10")
+    if not isinstance(max_open_trades, int) or not 1 <= max_open_trades <= 100:
+        raise ValueError("max_open_trades must be between 1 and 100")
+
+    timeline = sorted({ts for values in times.values() for ts in values})
+    if len(timeline) < folds * 3:
+        raise ValueError("Not enough chronological market bars for requested folds")
+    ranges = []
+    for i in range(folds):
+        left, right = (i * len(timeline)) // folds, ((i + 1) * len(timeline)) // folds
+        if right > left:
+            ranges.append((timeline[left], timeline[right - 1]))
+
+    def replay(candles, fold_signals, multiplier=1.0):
+        return run_multi_symbol_backtest(
+            candles, fold_signals, initial_equity=initial_equity,
+            spread=spread * multiplier, slippage=slippage * multiplier,
+            commission_pct=commission_pct * multiplier,
+            max_open_trades=max_open_trades,
+            max_daily_loss_pct=max_daily_loss_pct,
+            max_weekly_loss_pct=max_weekly_loss_pct,
+            max_drawdown_pct=max_drawdown_pct,
+        )
+
+    fold_reports, stress_reports, trades, stress_trades = [], [], [], []
+    for number, (start, end) in enumerate(ranges, 1):
+        fc, fs = _wf_fold_input(normalized, times, signals, start, end)
+        if not fc:
+            fold_reports.append({
+                "fold": number, "status": "insufficient_market_window",
+                "start_time": start, "end_time": end, "trade_count": 0,
+                "net_pnl": 0.0, "max_drawdown_pct": None, "rejected_signals": [],
+            })
+            continue
+        result = replay(fc, fs)
+        fold_trades = result["trades"]
+        trades.extend([{**t, "oos_fold": number} for t in fold_trades])
+        fold_reports.append({
+            "fold": number, "status": "completed", "start_time": start,
+            "end_time": end, "symbols": list(fc), "signal_count": len(fs),
+            "trade_count": result["trade_count"], "wins": result["wins"],
+            "losses": result["losses"], "win_rate_pct": result["win_rate_pct"],
+            "net_pnl": result["net_pnl"], "profit_factor": result["profit_factor"],
+            "max_drawdown_pct": result["max_drawdown_pct"],
+            "expectancy_per_trade": result["expectancy_per_trade"],
+            "trades": fold_trades, "rejected_signals": result["rejected_signals"],
+            "assumptions": result["assumptions"], "execution_allowed": False,
+        })
+        stressed = replay(fc, fs, stress_cost_multiplier)
+        stress_trades.extend(stressed["trades"])
+        stress_reports.append({
+            "fold": number, "status": "completed",
+            "trade_count": stressed["trade_count"], "net_pnl": stressed["net_pnl"],
+            "max_drawdown_pct": stressed["max_drawdown_pct"],
+            "profit_factor": stressed["profit_factor"],
+            "rejected_signals": stressed["rejected_signals"],
+        })
+
+    completed = [f for f in fold_reports if f["status"] == "completed"]
+    pnls = [float(t["net_pnl"]) for t in trades]
+    wins, losses = sum(x > 0 for x in pnls), sum(x < 0 for x in pnls)
+    gross_profit = sum(x for x in pnls if x > 0)
+    gross_loss = -sum(x for x in pnls if x < 0)
+    positive_folds = sum(f["net_pnl"] > 0 for f in completed)
+    aggregate = {
+        "requested_test_folds": folds, "completed_test_folds": len(completed),
+        "positive_test_folds": positive_folds,
+        "positive_fold_ratio_pct": round(positive_folds / folds * 100, 6),
+        "trade_count": len(pnls), "wins": wins, "losses": losses,
+        "win_rate_pct": round(wins / len(pnls) * 100, 6) if pnls else None,
+        "net_pnl": round(sum(pnls), 8),
+        "profit_factor": round(gross_profit / gross_loss, 8) if gross_loss else ("infinite" if gross_profit else None),
+        "expectancy_per_trade": round(sum(pnls) / len(pnls), 8) if pnls else None,
+        "trade_sequence_max_drawdown_pct": None,
+        "drawdown_scope": "not_aggregated_across_independent_folds",
+    }
+    stress_completed = [f for f in stress_reports if f["status"] == "completed"]
+    stress_dd = [f["max_drawdown_pct"] for f in stress_completed if f["max_drawdown_pct"] is not None]
+    stress = {
+        "status": "completed" if stress_completed else "insufficient_data",
+        "cost_multiplier": stress_cost_multiplier,
+        "fold_execution_count": len(stress_completed), "folds": stress_reports,
+        "pooled_net_pnl": round(sum(float(t["net_pnl"]) for t in stress_trades), 8),
+        "worst_fold_max_drawdown_pct": round(max(stress_dd), 8) if stress_dd else None,
+        "execution_allowed": False,
+    }
+    return {
+        "status": "completed" if completed else "insufficient_data",
+        "validation_type": "rolling_walk_forward_oos_replay",
+        "mode": "historical_research", "folds": fold_reports,
+        "aggregate_oos": aggregate,
+        "monte_carlo": _wf_mc(pnls, monte_carlo_simulations, random_seed, initial_equity),
+        "execution_cost_stress": stress, "estimated_win_probability": None,
+        "methodology": {
+            "optimization": "Parameter optimization is not performed; fixed caller-supplied signals are replayed on chronological out-of-sample windows.",
+            "fold_design": "Chronological disjoint timestamp windows with independently reset equity.",
+            "signal_selection": "Signal decision and its following entry candle must both fall inside the same OOS window.",
+            "monte_carlo": "Descriptive bootstrap resampling, not a forecast.",
+        },
+        "limitations": [
+            "Signals are caller-supplied; this endpoint cannot independently verify causal signal generation.",
+            "No parameter optimization, walk-forward fitting, or multiple-testing correction is performed.",
+            "Independent folds reset equity; pooled PnL is not a compounded equity curve.",
+            "The OHLC engine assumes stop-loss before target when both are touched in one candle.",
+            "Broker margin, leverage, funding, liquidation, order-book depth, latency and live fills are not modeled.",
+            "Monte Carlo resampling does not model serial dependence or future market regimes.",
+            "Research diagnostics only; no profitability guarantee or live-readiness certification.",
+        ],
+        "execution_allowed": False,
+    }
+

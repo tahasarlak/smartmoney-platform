@@ -61,8 +61,9 @@ def evaluate_strategy_candidates(*, market_regime: str, strategies: list[dict[st
     ranked.sort(key=lambda x: (x["eligible_for_consideration"], x["score"], x["trade_count"]), reverse=True)
     return {"status": "evaluated" if ranked else "no_candidates", "market_regime": regime,
             "candidate_count": len(ranked), "eligible_candidate_count": sum(x["eligible_for_consideration"] for x in ranked),
-            "ranked_strategies": ranked, "selection": None, "execution_allowed": False,
+            "ranked_strategies": ranked, "selection": None, "allocation_changes": [], "execution_allowed": False,
             "method": "transparent_heuristic_not_predictive_probability",
             "limitations": ["Metrics are caller-supplied and are not independently verified against the trade journal.",
                             "A score is not a probability or return forecast.",
                             "No strategy is activated and no capital is allocated."]}
+
