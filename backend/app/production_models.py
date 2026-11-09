@@ -90,3 +90,14 @@ class PaperBurninSample(Base):
     scheduled_for: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     sampled_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
     metrics_json: Mapped[dict] = mapped_column(JSON, nullable=False, default=dict)
+
+
+class WorkerHeartbeat(Base):
+    __tablename__ = "tradf_worker_heartbeats"
+    worker_id: Mapped[str] = mapped_column(String(120), primary_key=True)
+    hostname: Mapped[str] = mapped_column(String(120), nullable=False)
+    process_id: Mapped[int] = mapped_column(Integer, nullable=False)
+    started_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    heartbeat_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, index=True)
+    last_job_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    status: Mapped[str] = mapped_column(String(20), nullable=False, default="running")

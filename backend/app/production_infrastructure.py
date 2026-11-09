@@ -17,7 +17,8 @@ from sqlalchemy.orm import Session
 
 from .database import get_session_factory
 from .db_models import User, Session as LoginSession, Portfolio, ExecutionTrade, AuditEvent
-from .production_models import ExchangeCredential, ExchangeOrder, UserKillSwitch, GlobalKillSwitch, SchedulerJob, PaperBurninSample
+from .production_models import ExchangeCredential, ExchangeOrder, UserKillSwitch, GlobalKillSwitch, SchedulerJob, PaperBurninSample, WorkerHeartbeat
+from .production_controls import evaluate_testnet_order_limits, worker_liveness
 from .production_security import encrypt_secret, decrypt_secret, key_fingerprint, vault_ready, CredentialVaultError
 from .production_exchange import BinanceSpotTestnet, ExchangeTestnetError
 
@@ -220,6 +221,66 @@ class BurninStart(BaseModel):
     portfolio_id: str
     interval_seconds: int = Field(default=900,ge=300,le=3600)
 
+def record_worker_heartbeat(worker_id: str, *, status: str = "running", did_job: bool = False) -> None:
+    """Persist worker liveness without recording job payloads or secrets."""
+    db = _db()
+    try:
+        now = _now()
+        row = db.get(WorkerHeartbeat, worker_id)
+        if row is None:
+            row = WorkerHeartbeat(
+                worker_id=worker_id,
+                hostname=socket.gethostname()[:120],
+                process_id=os.getpid(),
+                started_at=now,
+                heartbeat_at=now,
+                last_job_at=now if did_job else None,
+                status=status,
+            )
+            db.add(row)
+        else:
+            row.heartbeat_at = now
+            row.status = status
+            if did_job:
+                row.last_job_at = now
+        db.commit()
+    finally:
+        db.close()
+
+
+@router.get("/worker/status")
+def worker_status(user=Depends(current_user)):
+    db = _db()
+    try:
+        row = db.scalar(select(WorkerHeartbeat).order_by(WorkerHeartbeat.heartbeat_at.desc()).limit(1))
+        if row is None:
+            return {
+                "status": "not_seen", "worker_running": False,
+                "last_heartbeat_at": None, "heartbeat_age_seconds": None,
+                "note": "No background worker heartbeat has been recorded yet.",
+                "execution_allowed": False,
+            }
+        heartbeat = row.heartbeat_at
+        if heartbeat.tzinfo is None:
+            heartbeat = heartbeat.replace(tzinfo=timezone.utc)
+        age = max(0.0, (_now() - heartbeat).total_seconds())
+        stale_after = max(30, int(os.getenv("TRADF_WORKER_POLL_SECONDS", "5")) * 6)
+        liveness = worker_liveness(
+            heartbeat_age_seconds=age,
+            worker_status=row.status,
+            stale_after_seconds=stale_after,
+        )
+        return {
+            **liveness,
+            "worker_id": row.worker_id,
+            "hostname": row.hostname,
+            "last_heartbeat_at": heartbeat.isoformat(),
+            "last_job_at": row.last_job_at.isoformat() if row.last_job_at else None,
+        }
+    finally:
+        db.close()
+
+
 @router.get("/status")
 def production_status(user=Depends(current_user)):
     db=_db()
@@ -300,7 +361,7 @@ async def create_testnet_order(payload: LimitOrderCreate,user=Depends(current_us
     try:
         _acquire_execution_locks(lock_db,user["id"])
         _execution_guard(db,user["id"])
-        _owned_portfolio(db,user["id"],payload.portfolio_id)
+        portfolio = _owned_portfolio(db,user["id"],payload.portfolio_id)
         c=_credential(db,user["id"],payload.credential_id)
         if c.portfolio_id!=payload.portfolio_id: raise HTTPException(status_code=404,detail="Credential does not belong to portfolio")
         client_id="tdf"+hashlib.sha256((user["id"]+payload.portfolio_id+payload.client_request_id).encode()).hexdigest()[:32]
@@ -322,6 +383,33 @@ async def create_testnet_order(payload: LimitOrderCreate,user=Depends(current_us
                     db.rollback()
             return {"id":existing.id,"status":existing.status,"client_order_id":existing.client_order_id,
                     "idempotent_replay":True,"resubmitted":False}
+
+        active_rows = db.scalars(select(ExchangeOrder).where(
+            ExchangeOrder.user_id == user["id"],
+            ExchangeOrder.portfolio_id == payload.portfolio_id,
+            ExchangeOrder.status.in_(["NEW", "PARTIALLY_FILLED", "PENDING_CANCEL", "SUBMITTING", "UNKNOWN"]),
+        )).all()
+        active_notionals = [
+            Decimal(row.quantity) * Decimal(row.price)
+            for row in active_rows
+        ]
+        try:
+            risk_check = evaluate_testnet_order_limits(
+                quantity=payload.quantity,
+                price=payload.price,
+                active_order_notionals=active_notionals,
+                portfolio_equity=float(portfolio.initial_equity),
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc))
+        if not risk_check["allowed"]:
+            raise HTTPException(status_code=423, detail={
+                "code": "TESTNET_RISK_LIMIT_EXCEEDED",
+                "message": "The requested order exceeds a configured Testnet exposure limit.",
+                "reasons": risk_check["reasons"],
+                "risk_check": risk_check,
+            })
+
         # Persist intent before network I/O so a timeout cannot cause a duplicate order on retry.
         row=ExchangeOrder(id=str(uuid.uuid4()),user_id=user["id"],portfolio_id=payload.portfolio_id,
             credential_id=c.id,provider="binance_spot_testnet",symbol=payload.symbol.upper(),side=payload.side,
@@ -363,6 +451,60 @@ def list_testnet_orders(portfolio_id: str,user=Depends(current_user)):
         return {"items":[{"id":x.id,"symbol":x.symbol,"side":x.side,"quantity":x.quantity,"price":x.price,
             "status":x.status,"exchange_order_id":x.exchange_order_id,"created_at":x.created_at.isoformat()} for x in rows]}
     finally: db.close()
+
+@router.post("/exchange/testnet/orders/reconcile")
+async def reconcile_testnet_orders(portfolio_id: str, user=Depends(current_user)):
+    """Refresh persisted open/ambiguous orders from Binance Spot Testnet without resubmission."""
+    db = _db()
+    try:
+        _owned_portfolio(db, user["id"], portfolio_id)
+        rows = db.scalars(select(ExchangeOrder).where(
+            ExchangeOrder.user_id == user["id"],
+            ExchangeOrder.portfolio_id == portfolio_id,
+            ExchangeOrder.status.in_(["NEW", "PARTIALLY_FILLED", "PENDING_CANCEL", "SUBMITTING", "UNKNOWN"]),
+        ).order_by(ExchangeOrder.created_at.asc()).limit(100)).all()
+        updated, unresolved = [], []
+        for row in rows:
+            try:
+                credential = _credential(db, user["id"], row.credential_id)
+                result = await _adapter(credential).get_order(
+                    symbol=row.symbol, client_order_id=row.client_order_id
+                )
+                exchange_status = str(result.get("status", "UNKNOWN")).upper()
+                if exchange_status not in {
+                    "NEW", "PARTIALLY_FILLED", "PENDING_CANCEL", "FILLED",
+                    "CANCELED", "REJECTED", "EXPIRED",
+                }:
+                    exchange_status = "UNKNOWN"
+                row.status = exchange_status
+                if result.get("orderId") is not None:
+                    row.exchange_order_id = str(result["orderId"])
+                row.response_json = {
+                    "status": exchange_status,
+                    "executedQty": str(result.get("executedQty", "")),
+                    "updateTime": result.get("updateTime"),
+                    "reconciled": True,
+                }
+                row.updated_at = _now()
+                updated.append({"id": row.id, "status": row.status})
+            except (ExchangeTestnetError, HTTPException):
+                unresolved.append({"id": row.id, "status": row.status, "reason": "exchange_status_unavailable"})
+            except Exception:
+                unresolved.append({"id": row.id, "status": row.status, "reason": "reconciliation_error"})
+        db.commit()
+        _audit_security_event(db, user["id"], "TESTNET_ORDERS_RECONCILED", portfolio_id, None,
+                              {"updated_count": len(updated), "unresolved_count": len(unresolved)})
+        db.commit()
+        return {
+            "portfolio_id": portfolio_id,
+            "checked_count": len(rows),
+            "updated": updated,
+            "unresolved": unresolved,
+            "orders_resubmitted": False,
+            "live_trading_enabled": False,
+        }
+    finally:
+        db.close()
 
 @router.post("/exchange/testnet/orders/{order_id}/cancel")
 async def cancel_testnet_order(order_id: str,user=Depends(current_user)):
