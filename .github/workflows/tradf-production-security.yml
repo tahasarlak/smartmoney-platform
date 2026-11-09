@@ -1,0 +1,38 @@
+name: TRADF production security checks
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  backend-security:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install backend dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r backend/requirements.txt
+          pip install bandit pip-audit
+      - name: Unit tests
+        working-directory: backend
+        run: pytest -q tests/test_production_infrastructure.py
+      - name: Static security scan
+        run: bandit -q -r backend/app -ll
+      - name: Dependency vulnerability audit
+        run: pip-audit -r backend/requirements.txt
+  secret-scan:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: gitleaks/gitleaks-action@v2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
