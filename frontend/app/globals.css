@@ -259,3 +259,45 @@ html[dir="rtl"] body{font-family:Vazirmatn,Inter,sans-serif}
 
 .pSafe{max-width:1050px;margin:auto;padding:26px 18px 55px;color:var(--text,#eaf0f8);min-height:100vh}.pSafe header{display:flex;gap:8px;color:#9eafc3;margin-bottom:24px}.pSafe a{color:#8bbcff}.pSafeHero,.pSafeCard{background:linear-gradient(145deg,#14243a,#0d192b);border:1px solid #2b405a;border-radius:17px;padding:22px;margin-bottom:16px}.pSafeHero>span{font-size:11px;letter-spacing:.1em;color:#8dbdff}.pSafeHero h1{font-size:clamp(25px,4vw,36px);margin:13px 0}.pSafeHero p,.pSafeCard p,.pSafeCard small{color:#aab9ca;line-height:1.7}.pSafeGrid{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:11px;margin:16px 0}.pSafeGrid article{display:grid;gap:8px;padding:15px;border-radius:13px;background:#111e30;border:1px solid #293d57}.pSafeGrid article svg{color:#8ebcff}.pSafeGrid span,.pSafeGrid b{font-size:12px;overflow-wrap:anywhere}.pSafeGrid span{color:#9eafc3}.pSafeCard h2{display:flex;align-items:center;gap:9px;margin:0 0 15px;font-size:18px}.pSafeCard h2 svg{color:#8ebcff}.pSafeCard label{display:grid;gap:7px;margin:12px 0;color:#bdcadd;font-size:13px}.pSafeCard input:not([type=checkbox]),.pSafeCard select{width:100%;padding:11px;border-radius:9px;background:#091729;border:1px solid #344963;color:#edf4ff}.pSafeCheck{display:flex!important;align-items:center;gap:9px}.pSafeCard button,.pSafeRefresh{display:inline-flex;align-items:center;gap:8px;padding:11px 15px;border:0;border-radius:9px;background:#2457a2;color:white;margin:8px 0}.pSafeCard button:disabled{opacity:.5}.pSafeCard .pSafeDanger{background:#8e302f}.pSafeCard small{display:block;font-size:11px;margin-top:8px}.pSafeStats{display:flex;gap:25px;flex-wrap:wrap;margin:18px 0}.pSafeStats b{font-size:20px}.pSafeStats small{display:inline;color:#aab9ca}.pSafeAlert{color:#f1c47d;background:#2b2418;border:1px solid #705a2c;padding:12px;border-radius:10px}.pSafe footer{text-align:center;color:#71839b;font-size:11px;margin-top:25px}@media(max-width:700px){.pSafeGrid{grid-template-columns:repeat(2,minmax(0,1fr))}}
 
+
+
+/* TRADF MT5 Forex / Gold workspace */
+.forex-page{min-height:100vh;background:radial-gradient(ellipse at 70% -10%,rgba(40,95,130,.25),transparent 45%),#070c15;color:#e8eef8;font-family:Vazirmatn,Inter,sans-serif}
+.forex-header{height:68px;padding:0 max(22px,calc((100vw - 1360px)/2));display:flex;align-items:center;justify-content:space-between;border-bottom:1px solid #223149;background:rgba(8,15,26,.88);position:sticky;top:0;z-index:5}
+.forex-brand{font-weight:900;letter-spacing:.12em}.forex-brand span{font-size:9px;color:#39d6a0;margin-right:8px;letter-spacing:.18em}
+.forex-back{display:flex;align-items:center;gap:8px;color:#a9bad0;font-size:12px}
+.forex-wrap{max-width:1360px;margin:0 auto;padding:34px 24px 60px}
+.forex-title{display:flex;align-items:flex-end;justify-content:space-between;gap:20px;margin-bottom:22px}
+.forex-eyebrow{color:#7db9ed;font-size:11px;font-weight:700}
+.forex-title h1{font-size:28px;margin:8px 0 5px}.forex-title p{font-size:12px;color:#8b9ab0;margin:0}
+.forex-connection{display:flex;align-items:center;gap:8px;border:1px solid #35465c;border-radius:30px;padding:10px 14px;font-size:11px}
+.forex-connection.is-online{color:#72e2b6;border-color:#285b4b;background:#10271f}.forex-connection.is-offline{color:#f2bd76;border-color:#60492c;background:#251d14}
+.forex-safety{display:flex;align-items:center;gap:10px;background:#10231f;border:1px solid #285446;color:#9ce6c7;border-radius:12px;padding:13px 15px;font-size:11px;margin-bottom:18px}
+.forex-error{background:#321b22;border:1px solid #75404a;color:#ffb9c3;border-radius:10px;padding:12px;margin-bottom:15px;font-size:12px}
+.forex-grid{display:grid;grid-template-columns:minmax(260px,.72fr) minmax(0,1.8fr);gap:16px;align-items:start}
+.forex-panel{background:linear-gradient(145deg,#111d2e,#0b1320);border:1px solid #223149;border-radius:16px;padding:18px;min-width:0}
+.forex-panel-head{display:flex;align-items:center;justify-content:space-between;gap:12px;margin-bottom:16px}
+.forex-panel-head h2{font-size:16px;margin:0 0 4px}.forex-panel-head small{font-size:10px;color:#8291a8}
+.forex-panel-head>button{background:#17253a;color:#b9c8dc;border:1px solid #30435e;border-radius:8px;width:34px;height:34px;display:grid;place-items:center}
+.forex-symbol-list{display:grid;gap:7px}
+.forex-symbol-list>button{width:100%;display:flex;align-items:center;justify-content:space-between;gap:8px;text-align:right;padding:12px;border:1px solid #26374f;border-radius:10px;background:#101b2b;color:#dfe8f4}
+.forex-symbol-list>button.selected{border-color:#39d6a0;background:#102b28}
+.forex-symbol-list b{display:block;font-size:13px;letter-spacing:.04em}.forex-symbol-list small{display:block;color:#8494aa;font-size:10px;margin-top:3px}
+.forex-symbol-list i{font-style:normal;color:#8796aa;font-size:9px;white-space:nowrap}.forex-symbol-list i.available{color:#65d8aa}
+.forex-controls{display:flex;align-items:end;justify-content:space-between;gap:12px;margin:12px 0}
+.forex-controls label{display:grid;gap:6px;color:#92a2b8;font-size:10px}
+.forex-controls select{background:#0b1524;color:#e8eef8;border:1px solid #31435b;border-radius:8px;padding:9px 13px;min-width:110px}
+.forex-controls button,.forex-analysis{display:flex;align-items:center;justify-content:center;gap:7px;background:#193c38;color:#9cf0cf;border:1px solid #2c6b59;border-radius:9px;padding:10px 13px;font-size:11px}
+.forex-controls button:disabled,.forex-analysis:disabled{opacity:.5}
+.forex-price{font-size:32px;font-weight:800;letter-spacing:-.03em;margin:15px 0 18px}.forex-price small{display:block;color:#8291a8;font-size:10px;font-weight:400;letter-spacing:0;margin-top:5px}
+.forex-table-wrap{overflow-x:auto;border:1px solid #25364d;border-radius:10px}
+.forex-table-wrap table{width:100%;border-collapse:collapse;white-space:nowrap;font-size:10px}
+.forex-table-wrap th,.forex-table-wrap td{padding:10px 12px;border-bottom:1px solid #213047;text-align:right}
+.forex-table-wrap th{color:#8294ad;background:#111e30;font-weight:600}.forex-table-wrap td{color:#d4deeb;font-variant-numeric:tabular-nums}
+.forex-empty{padding:25px;text-align:center;color:#8796aa;font-size:11px}
+.forex-updated{display:block;color:#73849b;font-size:9px;margin:10px 0}
+.forex-analysis{width:100%;background:linear-gradient(100deg,#39d6a0,#76b0ff);color:#07151b;border:0;font-weight:800;padding:12px;margin-top:8px}
+.forex-analysis-result{display:grid;gap:8px;background:#101f2d;border:1px solid #2d4858;border-radius:10px;padding:14px;margin-top:13px;font-size:11px}
+.forex-analysis-result b{color:#8ce3bd}.forex-analysis-result small{color:#9aabc0}.forex-analysis-result ul{margin:0;padding-right:18px;color:#b9c8d9;line-height:1.9}
+.forex-footnote{color:#718198;font-size:10px;line-height:1.9;margin-top:18px}
+@media(max-width:850px){.forex-grid{grid-template-columns:1fr}.forex-title{align-items:flex-start;flex-direction:column}.forex-wrap{padding:24px 14px 45px}.forex-header{padding:0 14px}.forex-price{font-size:27px}}

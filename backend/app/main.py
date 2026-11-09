@@ -44,6 +44,7 @@ from .paper_automation_router import router as paper_automation_router
 from .phase12_router import router as phase12_router
 from .operational_resilience import build_operational_health
 from .production_infrastructure import router as production_router
+from .forex_reference import router as forex_reference_router
 
 
 @asynccontextmanager
@@ -71,6 +72,7 @@ app.include_router(live_strategy_router)
 app.include_router(paper_automation_router)
 app.include_router(phase12_router)
 app.include_router(production_router)
+app.include_router(forex_reference_router)
 _current_settings = SettingsIn()
 
 v8_service = V8IntelligenceService(

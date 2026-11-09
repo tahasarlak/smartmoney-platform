@@ -56,3 +56,6 @@ test_neon_connection.py
 .phase5-backups/
 .phase6-backups/
 .phase9-backups/
+
+# MT5 Forex patch backups
+.mt5-forex-backup-*/

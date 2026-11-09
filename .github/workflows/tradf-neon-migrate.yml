@@ -1,13 +1,10 @@
-
-    
-  
 name: TRADF - Apply Neon Database Migrations
 
 on:
   workflow_dispatch:
     inputs:
       confirm_migration:
-        description: "I have verified the target Neon database and approve applying all pending Alembic migrations."
+        description: "I verified the target Neon database and approve applying pending Alembic migrations."
         required: true
         type: boolean
         default: false
@@ -23,10 +20,7 @@ jobs:
   migrate:
     name: Apply and verify database migrations
     runs-on: ubuntu-latest
-    timeout-minutes: 15
-
-    # Configure this GitHub Environment with the DIRECT_URL secret.
-    # Add required reviewers in GitHub Environment protection rules if desired.
+    timeout-minutes: 20
     environment: development
 
     steps:
@@ -36,18 +30,17 @@ jobs:
           CONFIRM: ${{ inputs.confirm_migration }}
         run: |
           if [[ "$CONFIRM" != "true" ]]; then
-            echo "::error::Migration was not approved. Set confirm_migration to true."
+            echo "::error::Migration was not approved."
             exit 1
           fi
 
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Verify migration files and chain
+      - name: Verify migration chain
         shell: bash
         run: |
           set -euo pipefail
-
           required=(
             backend/alembic.ini
             backend/migrations/env.py
@@ -56,32 +49,21 @@ jobs:
             backend/migrations/versions/0003_phase9_paper_execution.py
             backend/migrations/versions/0004_tradf_production_infrastructure.py
             backend/migrations/versions/0005_tradf_worker_heartbeat.py
+            backend/migrations/versions/0006_mt5_market_data.py
             backend/app/production_models.py
           )
-
           for file in "${required[@]}"; do
-            if [[ ! -f "$file" ]]; then
-              echo "::error::Required migration source is missing: $file"
-              exit 1
-            fi
+            test -f "$file" || { echo "::error::Missing $file"; exit 1; }
           done
-
-          grep -q 'from app import production_models' backend/migrations/env.py || {
-            echo "::error::Alembic env.py does not register production_models."
-            exit 1
-          }
-
-          grep -q 'revision = "0005_tradf_worker_heartbeat"' \
-            backend/migrations/versions/0005_tradf_worker_heartbeat.py
-          grep -q 'down_revision = "0004_tradf_production_infrastructure"' \
-            backend/migrations/versions/0005_tradf_worker_heartbeat.py
-
-          echo "Required migration files and expected 0004 -> 0005 chain found."
+          grep -q 'revision = "0006_mt5_market_data"' backend/migrations/versions/0006_mt5_market_data.py
+          grep -q 'down_revision = "0005_tradf_worker_heartbeat"' backend/migrations/versions/0006_mt5_market_data.py
+          grep -q 'from app import production_models' backend/migrations/env.py
+          echo "Migration chain through 0006 is present."
 
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
-          python-version: "3.10"
+          python-version: "3.12"
           cache: pip
           cache-dependency-path: backend/requirements.txt
 
@@ -96,5 +78,73 @@ jobs:
           DIRECT_URL: ${{ secrets.DIRECT_URL }}
         shell: bash
         run: |
+          set -euo pipefail
           if [[ -z "${DIRECT_URL:-}" ]]; then
+            echo "::error::GitHub Environment secret DIRECT_URL is missing."
+            exit 1
+          fi
+          case "$DIRECT_URL" in
+            postgresql://*|postgres://*|postgresql+psycopg://*) ;;
+            *) echo "::error::DIRECT_URL must be a PostgreSQL connection URL."; exit 1 ;;
+          esac
+          echo "DIRECT_URL is configured."
 
+      - name: Show migration heads
+        working-directory: backend
+        env:
+          DIRECT_URL: ${{ secrets.DIRECT_URL }}
+        run: |
+          python -m alembic heads
+          python -m alembic history
+
+      - name: Apply pending migrations
+        working-directory: backend
+        env:
+          DIRECT_URL: ${{ secrets.DIRECT_URL }}
+        run: python -m alembic upgrade head
+
+      - name: Verify revision and MT5 tables
+        working-directory: backend
+        env:
+          DIRECT_URL: ${{ secrets.DIRECT_URL }}
+        run: |
+          python - <<'PY'
+          import os
+          from sqlalchemy import create_engine, inspect, text
+          from sqlalchemy.engine import make_url
+
+          url = make_url(os.environ["DIRECT_URL"])
+          if url.drivername in ("postgres", "postgresql"):
+              url = url.set(drivername="postgresql+psycopg")
+          engine = create_engine(
+              url,
+              pool_pre_ping=True,
+              connect_args={"connect_timeout": 20, "sslmode": "require"},
+          )
+          required = {
+              "tradf_mt5_market_candles",
+              "tradf_mt5_bridge_heartbeats",
+              "tradf_worker_heartbeats",
+              "tradf_exchange_credentials",
+              "tradf_exchange_orders",
+              "tradf_global_kill_switch",
+              "tradf_user_kill_switches",
+              "tradf_scheduler_jobs",
+              "tradf_paper_burnin_samples",
+          }
+          try:
+              with engine.connect() as connection:
+                  revision = connection.execute(
+                      text("SELECT version_num FROM alembic_version")
+                  ).scalar_one()
+                  if revision != "0006_mt5_market_data":
+                      raise RuntimeError(f"Expected 0006_mt5_market_data, got {revision}")
+                  missing = sorted(required - set(inspect(connection).get_table_names()))
+                  if missing:
+                      raise RuntimeError("Missing tables: " + ", ".join(missing))
+                  print("Alembic revision:", revision)
+                  print("All required production and MT5 market-data tables exist.")
+                  print("DATABASE MIGRATION VERIFICATION: SUCCESS")
+          finally:
+              engine.dispose()
+          PY

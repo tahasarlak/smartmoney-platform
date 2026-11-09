@@ -1,6 +1,6 @@
 from __future__ import annotations
 from datetime import datetime
-from sqlalchemy import Boolean, DateTime, ForeignKey, Index, Integer, JSON, String, Text, UniqueConstraint, func
+from sqlalchemy import Boolean, DateTime, Float, ForeignKey, Index, Integer, JSON, String, Text, UniqueConstraint, func
 from sqlalchemy.orm import Mapped, mapped_column
 from .database import Base
 
@@ -101,3 +101,34 @@ class WorkerHeartbeat(Base):
     heartbeat_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, index=True)
     last_job_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     status: Mapped[str] = mapped_column(String(20), nullable=False, default="running")
+
+
+class MT5MarketCandle(Base):
+    """Persisted read-only OHLCV candles received from a local MT5 demo bridge."""
+    __tablename__ = "tradf_mt5_market_candles"
+    __table_args__ = (
+        Index("ix_tradf_mt5_candles_symbol_tf_time", "symbol", "timeframe", "candle_time"),
+    )
+    symbol: Mapped[str] = mapped_column(String(16), primary_key=True)
+    timeframe: Mapped[str] = mapped_column(String(8), primary_key=True)
+    candle_time: Mapped[int] = mapped_column(Integer, primary_key=True)
+    open: Mapped[float] = mapped_column(Float, nullable=False)
+    high: Mapped[float] = mapped_column(Float, nullable=False)
+    low: Mapped[float] = mapped_column(Float, nullable=False)
+    close: Mapped[float] = mapped_column(Float, nullable=False)
+    volume: Mapped[float] = mapped_column(Float, nullable=False, default=0.0)
+    spread_points: Mapped[int | None] = mapped_column(Integer)
+    broker_symbol: Mapped[str] = mapped_column(String(40), nullable=False)
+    received_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
+
+
+class MT5BridgeHeartbeat(Base):
+    """Non-sensitive health information for an outbound, read-only MT5 bridge."""
+    __tablename__ = "tradf_mt5_bridge_heartbeats"
+    bridge_id: Mapped[str] = mapped_column(String(80), primary_key=True)
+    broker_server: Mapped[str] = mapped_column(String(120), nullable=False)
+    terminal_version: Mapped[str] = mapped_column(String(80), nullable=False)
+    account_mode: Mapped[str] = mapped_column(String(12), nullable=False, default="demo")
+    last_seen_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, index=True)
+    status: Mapped[str] = mapped_column(String(20), nullable=False, default="connected")
+    last_error: Mapped[str | None] = mapped_column(String(240))

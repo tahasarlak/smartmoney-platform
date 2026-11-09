@@ -187,7 +187,7 @@ export default function Home() {
       <header className="beginner-header">
         <Link href="/" className="brand"><span className="brand-mark">T</span>TRADF</Link>
         <nav className="beginner-nav">
-          <a href="#overview">نمای کلی</a><a href="#account">حساب من</a><Link href="/analytics">عملکرد</Link><Link href="/advanced">ابزار حرفه‌ای</Link>
+          <a href="#overview">نمای کلی</a><a href="#account">حساب من</a><Link href="/analytics">عملکرد</Link><Link href="/forex">فارکس و طلا</Link><Link href="/advanced">ابزار حرفه‌ای</Link>
         </nav>
         <div className="header-user"><span>{userEmail}</span><button className="icon-button" onClick={logout} title="خروج"><LogOut size={17}/></button></div>
       </header>
@@ -230,7 +230,7 @@ export default function Home() {
 
       <section className="surface-card next-steps">
         <div><span className="eyebrow">قدم بعدی</span><h2>از محیط آزمایشی شروع کن</h2><p>بدون واریز وجه، گزارش‌ها و رفتار سیستم را بررسی کن. وقتی آماده بودی، ابزارهای تخصصی در دسترس هستند.</p></div>
-        <div className="next-actions"><Link className="primary" href="/analytics"><BarChart3 size={17}/> مشاهده عملکرد</Link><Link className="secondary" href="/v11"><Activity size={17}/> فضای معاملاتی آزمایشی</Link><Link className="text-link" href="/advanced">ابزارهای حرفه‌ای و تحلیل بازار</Link></div>
+        <div className="next-actions"><Link className="primary" href="/analytics"><BarChart3 size={17}/> مشاهده عملکرد</Link><Link className="secondary" href="/forex"><Activity size={17}/> بازار فارکس و طلا</Link><Link className="secondary" href="/v11"><Activity size={17}/> فضای معاملاتی آزمایشی</Link><Link className="text-link" href="/advanced">ابزارهای حرفه‌ای و تحلیل بازار</Link></div>
       </section>
 
       <footer className="beginner-footer"><span>TRADF · مدیریت شفاف سرمایه</span><span>این محیط آزمایشی است و سود آینده را پیش‌بینی یا تضمین نمی‌کند.</span></footer>
