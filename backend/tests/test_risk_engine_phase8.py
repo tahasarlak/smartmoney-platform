@@ -106,8 +106,9 @@ def test_allocator_rejects_wrong_side_stop_and_duplicate_candidates():
 
 def test_phase8_authenticated_api_routes_are_registered_without_database_access():
     from app.main import app
-    paths = {route.path for route in app.routes}
+    paths = set(app.openapi()["paths"].keys())
     assert "/api/v1/v11/risk/position-size" in paths
     assert "/api/v1/v11/risk/correlation" in paths
     assert "/api/v1/v11/portfolios/{portfolio_id}/risk" in paths
     assert "/api/v1/v11/portfolios/{portfolio_id}/risk/allocate" in paths
+

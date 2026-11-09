@@ -70,7 +70,7 @@ def test_cost_stress_is_reported_and_does_not_enable_execution():
 
 def test_validation_endpoint_is_registered_without_database_access():
     from app.main import app
-    paths = {route.path for route in app.routes}
+    paths = set(app.openapi()["paths"].keys())
     assert "/api/v1/backtest/validate" in paths
 
 
@@ -116,3 +116,4 @@ def test_empty_folds_remain_in_positive_fold_ratio_denominator():
     assert result["aggregate_oos"]["positive_fold_ratio_pct"] <= (
         result["aggregate_oos"]["positive_test_folds"] / 3 * 100
     )
+

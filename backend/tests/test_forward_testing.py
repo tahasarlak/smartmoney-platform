@@ -49,9 +49,10 @@ def test_invalid_fill_inputs_are_rejected():
 def test_forward_testing_api_routes_are_registered():
     from app.main import app
 
-    paths = {route.path for route in app.routes}
+    paths = set(app.openapi()["paths"].keys())
     assert "/api/v1/v11/forward/runs" in paths
     assert "/api/v1/v11/forward/runs/{run_id}/stop" in paths
     assert "/api/v1/v11/forward/runs/{run_id}/summary" in paths
     assert "/api/v1/v11/forward/runs/{run_id}/comparison" in paths
     assert "/api/v1/v11/forward/trades/{trade_id}/events" in paths
+
