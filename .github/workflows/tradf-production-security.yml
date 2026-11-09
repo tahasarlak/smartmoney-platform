@@ -22,7 +22,9 @@ jobs:
           pip install bandit pip-audit
       - name: Unit tests
         working-directory: backend
-        run: pytest -q tests/test_production_infrastructure.py
+        env:
+          PYTHONPATH: ${{ github.workspace }}/backend
+        run: python -m pytest -q tests/test_production_infrastructure.py
       - name: Static security scan
         run: bandit -q -r backend/app -ll
       - name: Dependency vulnerability audit
@@ -36,3 +38,4 @@ jobs:
       - uses: gitleaks/gitleaks-action@v2
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
