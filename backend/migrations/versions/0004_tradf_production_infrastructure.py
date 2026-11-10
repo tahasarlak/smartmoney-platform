@@ -12,6 +12,10 @@ branch_labels = None
 depends_on = None
 
 def upgrade():
+    op.execute(
+        "ALTER TABLE alembic_version "
+        "ALTER COLUMN version_num TYPE VARCHAR(128)"
+    )
     op.create_table(
         "tradf_exchange_credentials",
         sa.Column("id",sa.String(36),primary_key=True),
