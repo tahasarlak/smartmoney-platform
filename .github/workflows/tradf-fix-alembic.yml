@@ -1,0 +1,73 @@
+name: TRADF - Fix Alembic Version Column
+
+on:
+  workflow_dispatch:
+
+jobs:
+  fix-database:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r backend/requirements.txt
+
+      - name: Expand Alembic version column
+        working-directory: backend
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          DIRECT_URL: ${{ secrets.DIRECT_URL }}
+        run: |
+          python - <<'PY'
+          import os
+          from sqlalchemy import create_engine, text
+
+          url = os.getenv("DIRECT_URL") or os.getenv("DATABASE_URL")
+          if not url:
+              raise RuntimeError("Missing DATABASE_URL or DIRECT_URL secret")
+
+          engine = create_engine(url, pool_pre_ping=True)
+
+          with engine.begin() as conn:
+              current = conn.execute(
+                  text("SELECT version_num FROM alembic_version")
+              ).fetchall()
+
+              print("Current Alembic version:", current)
+
+              conn.execute(text("""
+                  ALTER TABLE alembic_version
+                  ALTER COLUMN version_num TYPE VARCHAR(128)
+              """))
+
+              size = conn.execute(text("""
+                  SELECT character_maximum_length
+                  FROM information_schema.columns
+                  WHERE table_schema = current_schema()
+                    AND table_name = 'alembic_version'
+                    AND column_name = 'version_num'
+              """)).scalar_one()
+
+              if size != 128:
+                  raise RuntimeError("Column size verification failed")
+
+              print("Alembic version column successfully expanded to 128")
+          PY
+
+      - name: Run Alembic migrations
+        working-directory: backend
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          DIRECT_URL: ${{ secrets.DIRECT_URL }}
+        run: |
+          alembic upgrade head
+          alembic current
