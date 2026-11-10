@@ -45,6 +45,7 @@ from .phase12_router import router as phase12_router
 from .operational_resilience import build_operational_health
 from .production_infrastructure import router as production_router
 from .forex_reference import router as forex_reference_router
+from .forex_router import router as forex_intraday_router
 
 
 @asynccontextmanager
@@ -73,6 +74,7 @@ app.include_router(paper_automation_router)
 app.include_router(phase12_router)
 app.include_router(production_router)
 app.include_router(forex_reference_router)
+app.include_router(forex_intraday_router)
 _current_settings = SettingsIn()
 
 v8_service = V8IntelligenceService(
@@ -688,6 +690,8 @@ async def v8_start(payload: V8StartRequest):
 @app.post("/api/v1/intelligence/v8/stop")
 async def v8_stop():
     return await v8_service.stop()
+
+
 
 
 

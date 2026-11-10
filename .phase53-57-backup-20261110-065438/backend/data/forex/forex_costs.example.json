@@ -1,0 +1,42 @@
+{
+  "EURUSD": {
+    "spread": 0.00015,
+    "slippage": 5e-05,
+    "commission_pct": 0.0
+  },
+  "GBPUSD": {
+    "spread": 0.0002,
+    "slippage": 7e-05,
+    "commission_pct": 0.0
+  },
+  "USDJPY": {
+    "spread": 0.015,
+    "slippage": 0.005,
+    "commission_pct": 0.0
+  },
+  "USDCHF": {
+    "spread": 0.00018,
+    "slippage": 6e-05,
+    "commission_pct": 0.0
+  },
+  "AUDUSD": {
+    "spread": 0.00018,
+    "slippage": 6e-05,
+    "commission_pct": 0.0
+  },
+  "USDCAD": {
+    "spread": 0.0002,
+    "slippage": 7e-05,
+    "commission_pct": 0.0
+  },
+  "NZDUSD": {
+    "spread": 0.00025,
+    "slippage": 8e-05,
+    "commission_pct": 0.0
+  },
+  "XAUUSD": {
+    "spread": 0.35,
+    "slippage": 0.1,
+    "commission_pct": 0.0
+  }
+}

@@ -7,6 +7,7 @@ from sqlalchemy.engine import make_url
 from app.database import Base
 from app import db_models  # noqa: F401 - register model metadata
 from app import production_models  # noqa: F401 - register production safety models
+from app import forex_models  # noqa: F401 - register Forex paper models
 
 config = context.config
 if config.config_file_name:
@@ -50,4 +51,6 @@ if context.is_offline_mode():
     run_migrations_offline()
 else:
     run_migrations_online()
+
+
 
