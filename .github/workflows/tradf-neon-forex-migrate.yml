@@ -1,0 +1,124 @@
+name: TRADF Neon Database Migration
+
+on:
+  workflow_dispatch:
+    inputs:
+      confirmation:
+        description: 'Type MIGRATE to apply pending Alembic migrations to Neon'
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: tradf-neon-migrations
+  cancel-in-progress: false
+
+jobs:
+  migrate:
+    name: Apply and verify Neon schema
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    defaults:
+      run:
+        working-directory: backend
+
+    env:
+      DIRECT_URL: ${{ secrets.NEON_DIRECT_URL }}
+
+    steps:
+      - name: Require explicit confirmation
+        shell: bash
+        run: |
+          if [[ "${{ inputs.confirmation }}" != "MIGRATE" ]]; then
+            echo "::error::Confirmation must be exactly MIGRATE."
+            exit 1
+          fi
+
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: "pip"
+          cache-dependency-path: backend/requirements.txt
+
+      - name: Install backend dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements.txt
+
+      - name: Validate secret and migration files
+        shell: bash
+        run: |
+          if [[ -z "${DIRECT_URL}" ]]; then
+            echo "::error::GitHub Actions secret NEON_DIRECT_URL is missing."
+            exit 1
+          fi
+          test -f migrations/env.py
+          test -f migrations/versions/0007_forex_intraday_paper.py
+          python - <<'PY'
+          import os
+          from sqlalchemy.engine import make_url
+          raw = os.environ["DIRECT_URL"]
+          url = make_url(raw)
+          if url.get_backend_name() != "postgresql":
+              raise SystemExit("NEON_DIRECT_URL must be a PostgreSQL URL.")
+          print("Neon PostgreSQL URL format validated; credentials are not displayed.")
+          PY
+
+      - name: Show migration plan
+        run: |
+          echo "Available Alembic heads:"
+          python -m alembic heads
+          echo "Current database revision (if initialized):"
+          python -m alembic current
+          echo "Migration history:"
+          python -m alembic history
+
+      - name: Apply migrations
+        run: python -m alembic upgrade head
+
+      - name: Verify target revision
+        shell: bash
+        run: |
+          CURRENT="$(python -m alembic current)"
+          echo "$CURRENT"
+          if ! grep -q "0007_forex_intraday_paper" <<< "$CURRENT"; then
+            echo "::error::Database is not at expected revision 0007_forex_intraday_paper."
+            exit 1
+          fi
+
+      - name: Verify Forex tables exist
+        run: |
+          python - <<'PY'
+          import os
+          from sqlalchemy import create_engine, inspect
+          from sqlalchemy.engine import make_url
+
+          url = make_url(os.environ["DIRECT_URL"])
+          if url.drivername in ("postgres", "postgresql"):
+              url = url.set(drivername="postgresql+psycopg")
+          engine = create_engine(url, pool_pre_ping=True, connect_args={"connect_timeout": 20, "sslmode": "require"})
+          expected = {
+              "tradf_forex_candles",
+              "tradf_forex_paper_runs",
+              "tradf_forex_paper_trades",
+              "tradf_forex_paper_events",
+              "tradf_forex_worker_state",
+          }
+          try:
+              with engine.connect() as connection:
+                  present = set(inspect(connection).get_table_names())
+              missing = sorted(expected - present)
+              if missing:
+                  raise SystemExit("Missing expected Forex tables: " + ", ".join(missing))
+              print("Verified all five Forex tables:")
+              for table in sorted(expected):
+                  print(" -", table)
+          finally:
+              engine.dispose()
+          PY
