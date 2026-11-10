@@ -1,8 +1,8 @@
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 import pytest
 
 from app.forex_intraday import CandleAggregator, SYMBOLS, validate_tick
-from app.forex_paper import quote_to_usd, _adverse_fill
+from app.forex_paper import quote_to_usd, _adverse_fill, evaluate_worker_readiness
 from app.forex_history import aggregate_m1
 
 
@@ -103,3 +103,40 @@ def test_aggregator_ignores_out_of_order_tick_inside_same_bucket():
     current = agg.current[("EURUSD", "5m")]
     assert current["close"] == 1.11
     assert current["low"] == 1.10
+
+
+def test_worker_readiness_requires_confirmed_subscription_and_fresh_tick_for_each_symbol():
+    now = datetime.now(timezone.utc)
+    symbols = set(SYMBOLS)
+    ticks = {symbol: now.isoformat() for symbol in symbols}
+    result = evaluate_worker_readiness("ready", list(symbols), ticks, now=now)
+    assert result["ready"] is True
+    assert result["missing_subscriptions"] == []
+    assert result["stale_symbols"] == []
+
+
+def test_worker_readiness_does_not_claim_all_symbols_from_one_tick():
+    now = datetime.now(timezone.utc)
+    result = evaluate_worker_readiness(
+        "ready", list(SYMBOLS), {"EURUSD": now.isoformat()}, now=now
+    )
+    assert result["ready"] is False
+    assert "EURUSD" not in result["stale_symbols"]
+    assert len(result["stale_symbols"]) == 7
+
+
+def test_worker_readiness_rejects_unconfirmed_subscriptions_even_with_fresh_ticks():
+    now = datetime.now(timezone.utc)
+    ticks = {symbol: now.isoformat() for symbol in SYMBOLS}
+    result = evaluate_worker_readiness("degraded", list(SYMBOLS), ticks, now=now)
+    assert result["ready"] is False
+
+
+def test_worker_readiness_rejects_stale_ticks():
+    now = datetime.now(timezone.utc)
+    old = (now - timedelta(minutes=10)).isoformat()
+    ticks = {symbol: now.isoformat() for symbol in SYMBOLS}
+    ticks["XAUUSD"] = old
+    result = evaluate_worker_readiness("ready", list(SYMBOLS), ticks, now=now)
+    assert result["ready"] is False
+    assert result["stale_symbols"] == ["XAUUSD"]

@@ -60,6 +60,7 @@ jobs:
           fi
           test -f migrations/env.py
           test -f migrations/versions/0007_forex_intraday_paper.py
+          test -f migrations/versions/0008_forex_worker_symbol_ticks.py
           python - <<'PY'
           import os
           from sqlalchemy.engine import make_url
@@ -87,8 +88,8 @@ jobs:
         run: |
           CURRENT="$(python -m alembic current)"
           echo "$CURRENT"
-          if ! grep -q "0007_forex_intraday_paper" <<< "$CURRENT"; then
-            echo "::error::Database is not at expected revision 0007_forex_intraday_paper."
+          if ! grep -q "0008_forex_worker_symbol_ticks" <<< "$CURRENT"; then
+            echo "::error::Database is not at expected revision 0008_forex_worker_symbol_ticks."
             exit 1
           fi
 
@@ -112,13 +113,18 @@ jobs:
           }
           try:
               with engine.connect() as connection:
-                  present = set(inspect(connection).get_table_names())
-              missing = sorted(expected - present)
-              if missing:
-                  raise SystemExit("Missing expected Forex tables: " + ", ".join(missing))
-              print("Verified all five Forex tables:")
+                  inspector = inspect(connection)
+                  present = set(inspector.get_table_names())
+                  missing = sorted(expected - present)
+                  if missing:
+                      raise SystemExit("Missing expected Forex tables: " + ", ".join(missing))
+                  worker_columns = {column["name"] for column in inspector.get_columns("tradf_forex_worker_state")}
+                  if "last_tick_by_symbol" not in worker_columns:
+                      raise SystemExit("Missing tradf_forex_worker_state.last_tick_by_symbol; migration 0008 is incomplete")
+              print("Verified all five Forex tables and per-symbol tick freshness column:")
               for table in sorted(expected):
                   print(" -", table)
+              print(" - tradf_forex_worker_state.last_tick_by_symbol")
           finally:
               engine.dispose()
           PY

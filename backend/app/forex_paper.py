@@ -6,10 +6,10 @@ import uuid
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
-from sqlalchemy import select, func
+from sqlalchemy import select, func, inspect
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 
-from .database import get_session_factory
+from .database import get_engine, get_session_factory
 from .db_models import Portfolio
 from .forex_models import ForexCandle, ForexPaperRun, ForexPaperTrade, ForexPaperEvent, ForexWorkerState
 from .forex_intraday import SYMBOLS, PROVIDER
@@ -41,27 +41,71 @@ def quote_to_usd(symbol: str, prices: dict[str, float] | None = None) -> float:
 
 
 
-def record_forex_worker_state(worker_id: str, *, status: str,
+def record_forex_worker_state(worker_id: str, *, status: str | None = None,
                               subscribed_symbols: list[str] | None = None,
                               last_tick_at: datetime | None = None,
+                              tick_symbol: str | None = None,
                               last_error: str | None = None) -> None:
+    """Persist provider-confirmed subscriptions and per-symbol tick telemetry."""
     from .database import session_scope
-    stmt = pg_insert(ForexWorkerState).values(
-        id=1, worker_id=worker_id, status=status,
-        subscribed_symbols=subscribed_symbols or [],
-        last_tick_at=last_tick_at, heartbeat_at=utcnow(),
-        last_error=(last_error or None),
-    )
-    stmt = stmt.on_conflict_do_update(
-        index_elements=[ForexWorkerState.id],
-        set_={"worker_id": stmt.excluded.worker_id, "status": stmt.excluded.status,
-              "subscribed_symbols": stmt.excluded.subscribed_symbols,
-              "last_tick_at": stmt.excluded.last_tick_at,
-              "heartbeat_at": stmt.excluded.heartbeat_at,
-              "last_error": stmt.excluded.last_error},
-    )
     with session_scope() as db:
-        db.execute(stmt)
+        row = db.get(ForexWorkerState, 1, with_for_update=True)
+        if row is None:
+            row = ForexWorkerState(
+                id=1, worker_id=worker_id, status=status or "starting",
+                subscribed_symbols=subscribed_symbols or [],
+                last_tick_by_symbol={},
+                heartbeat_at=utcnow(),
+            )
+            db.add(row)
+            db.flush()
+        row.worker_id = worker_id
+        if status is not None:
+            row.status = status
+        if subscribed_symbols is not None:
+            row.subscribed_symbols = list(subscribed_symbols)
+        if last_error is not None or status in ("ready", "starting"):
+            row.last_error = last_error
+        row.heartbeat_at = utcnow()
+        if last_tick_at is not None:
+            row.last_tick_at = last_tick_at
+            if tick_symbol:
+                ticks = dict(row.last_tick_by_symbol or {})
+                ticks[tick_symbol] = last_tick_at.isoformat()
+                row.last_tick_by_symbol = ticks
+
+
+def evaluate_worker_readiness(
+    status: str,
+    subscribed_symbols: list[str] | None,
+    last_tick_by_symbol: dict[str, str] | None,
+    *,
+    now: datetime | None = None,
+    max_age_seconds: int = 180,
+) -> dict[str, Any]:
+    now = now or utcnow()
+    subscribed = set(subscribed_symbols or [])
+    ticks = last_tick_by_symbol or {}
+    missing_subscriptions = sorted(set(SYMBOLS) - subscribed)
+    stale_symbols: list[str] = []
+    for symbol in SYMBOLS:
+        raw = ticks.get(symbol)
+        try:
+            observed = datetime.fromisoformat(str(raw).replace("Z", "+00:00"))
+            if observed.tzinfo is None:
+                observed = observed.replace(tzinfo=timezone.utc)
+            age = (now - observed).total_seconds()
+            if age < -30 or age > max_age_seconds:
+                stale_symbols.append(symbol)
+        except (TypeError, ValueError):
+            stale_symbols.append(symbol)
+    ready = status == "ready" and not missing_subscriptions and not stale_symbols
+    return {
+        "ready": ready,
+        "missing_subscriptions": missing_subscriptions,
+        "stale_symbols": stale_symbols,
+        "max_tick_age_seconds": max_age_seconds,
+    }
 
 
 def forex_worker_state() -> dict[str, Any]:
@@ -69,16 +113,20 @@ def forex_worker_state() -> dict[str, Any]:
     try:
         row = db.get(ForexWorkerState, 1)
         if row is None:
-            return {"status": "not_seen", "subscribed_symbols": [], "ready": False}
+            return {"status": "not_seen", "subscribed_symbols": [], "ready": False,
+                    "missing_subscriptions": list(SYMBOLS), "stale_symbols": list(SYMBOLS)}
         age = (utcnow() - row.heartbeat_at).total_seconds()
+        readiness = evaluate_worker_readiness(
+            row.status, row.subscribed_symbols, row.last_tick_by_symbol,
+        )
         return {
             "status": row.status, "worker_id": row.worker_id,
             "subscribed_symbols": row.subscribed_symbols,
             "heartbeat_at": row.heartbeat_at.isoformat(),
             "last_tick_at": row.last_tick_at.isoformat() if row.last_tick_at else None,
+            "last_tick_by_symbol": row.last_tick_by_symbol or {},
             "last_error": row.last_error, "heartbeat_age_seconds": max(0, age),
-            "ready": row.status == "ready" and age <= 120
-                    and set(row.subscribed_symbols or []) == set(SYMBOLS),
+            **readiness,
         }
     finally:
         db.close()
@@ -379,8 +427,8 @@ def process_forex_tick(tick: dict[str, Any], closed_candles: list[dict[str, Any]
     try:
         record_forex_worker_state(
             os.getenv("TRADF_FOREX_WORKER_ID", "forex-worker"),
-            status="ready", subscribed_symbols=list(SYMBOLS),
             last_tick_at=datetime.fromtimestamp(ts / 1000, tz=timezone.utc),
+            tick_symbol=symbol,
         )
     except Exception:
         # The main candle/trade transaction below remains authoritative.
@@ -444,17 +492,118 @@ def process_forex_tick(tick: dict[str, Any], closed_candles: list[dict[str, Any]
         db.close()
 
 
+def forex_paper_preflight(user_id: str, portfolio_id: str) -> dict[str, Any]:
+    """Read-only launch gate. It never creates a run or places an order."""
+    checks: dict[str, Any] = {}
+    errors: list[str] = []
+    required_tables = {
+        "tradf_forex_candles", "tradf_forex_paper_runs",
+        "tradf_forex_paper_trades", "tradf_forex_paper_events",
+        "tradf_forex_worker_state",
+    }
+    db = None
+    try:
+        engine = get_engine()
+        inspector = inspect(engine)
+        tables = set(inspector.get_table_names())
+        missing_tables = sorted(required_tables - tables)
+        worker_columns = (
+            {c["name"] for c in inspector.get_columns("tradf_forex_worker_state")}
+            if "tradf_forex_worker_state" in tables else set()
+        )
+        missing_columns = sorted({"last_tick_by_symbol"} - worker_columns)
+        checks["database"] = {
+            "connected": True, "missing_tables": missing_tables,
+            "missing_columns": missing_columns,
+        }
+        if missing_tables or missing_columns:
+            errors.append("Database migration 0008 is not fully applied")
+            return {
+                "status": "BLOCKED", "ready_for_21d_paper": False,
+                "checks": checks, "blockers": errors,
+                "mode": "paper", "execution_allowed": False,
+            }
+
+        checks["provider_key_configured"] = bool(
+            os.getenv("TWELVE_DATA_API_KEY", "").strip()
+        )
+        if not checks["provider_key_configured"]:
+            errors.append("TWELVE_DATA_API_KEY is not configured")
+
+        worker = forex_worker_state()
+        checks["worker"] = worker
+        if not worker.get("ready"):
+            errors.append("Worker must confirm subscriptions and fresh ticks for all eight symbols")
+
+        db = get_session_factory()()
+        portfolio = db.scalar(select(Portfolio).where(
+            Portfolio.id == portfolio_id, Portfolio.user_id == user_id
+        ))
+        checks["portfolio"] = {"exists_and_owned": portfolio is not None}
+        if portfolio is None:
+            errors.append("Portfolio does not exist or is not owned by this user")
+        else:
+            candle_counts: dict[str, dict[str, int]] = {}
+            insufficient: list[str] = []
+            for symbol in SYMBOLS:
+                candle_counts[symbol] = {}
+                for tf in TIMEFRAME_SECONDS:
+                    count = int(db.scalar(select(func.count()).select_from(ForexCandle).where(
+                        ForexCandle.symbol == symbol, ForexCandle.timeframe == tf
+                    )) or 0)
+                    candle_counts[symbol][tf] = count
+                    if count < 50:
+                        insufficient.append(f"{symbol}:{tf}={count}")
+            checks["historical_candles"] = {
+                "minimum_per_symbol_timeframe": 50,
+                "counts": candle_counts,
+                "insufficient": insufficient,
+            }
+            if insufficient:
+                errors.append("Historical candle coverage is insufficient; import complete M1 history first")
+            active = db.scalar(select(ForexPaperRun.id).where(
+                ForexPaperRun.user_id == user_id,
+                ForexPaperRun.portfolio_id == portfolio_id,
+                ForexPaperRun.status.in_(ACTIVE_RUN_STATES),
+            ).limit(1))
+            checks["existing_active_run"] = active
+            if active:
+                errors.append("This portfolio already has an active Forex paper run")
+        return {
+            "status": "READY_FOR_21D_PAPER" if not errors else "BLOCKED",
+            "ready_for_21d_paper": not errors,
+            "checks": checks, "blockers": errors,
+            "mode": "paper", "duration_days": 21,
+            "symbols": list(SYMBOLS),
+            "live_execution_enabled": False, "execution_allowed": False,
+        }
+    except Exception as exc:
+        return {
+            "status": "BLOCKED", "ready_for_21d_paper": False,
+            "checks": checks, "blockers": errors + [f"Preflight database/check failure: {type(exc).__name__}"],
+            "mode": "paper", "execution_allowed": False,
+        }
+    finally:
+        if db is not None:
+            db.close()
+
+
 def start_forex_paper_run(user_id: str, portfolio_id: str, *, risk_per_trade_pct: float = 0.25,
                           min_quality_score: int = 65, min_rr: float = 2.0,
                           commission_pct: float = 0.0, spread_bps: float = 1.5,
                           slippage_bps: float = 0.5, confirm_paper_only: bool = False) -> dict[str, Any]:
     if confirm_paper_only is not True:
         raise ValueError("Explicit confirm_paper_only=true is required")
-    if not os.getenv("TWELVE_DATA_API_KEY", "").strip():
-        raise ValueError("TWELVE_DATA_API_KEY is not configured")
+    preflight = forex_paper_preflight(user_id, portfolio_id)
+    if not preflight.get("ready_for_21d_paper"):
+        raise ValueError("Forex paper preflight blocked: " + "; ".join(preflight.get("blockers", [])))
     worker = forex_worker_state()
     if not worker.get("ready"):
-        raise ValueError("Forex worker is not ready; confirm all eight Twelve Data subscriptions and a fresh worker heartbeat first")
+        raise ValueError(
+            "Forex worker is not ready for all eight symbols; "
+            f"missing subscriptions={worker.get('missing_subscriptions')}, "
+            f"stale symbols={worker.get('stale_symbols')}"
+        )
     if not 0 < risk_per_trade_pct <= 2 or not 0 <= min_quality_score <= 100:
         raise ValueError("Invalid risk or quality settings")
     if not 0.5 <= min_rr <= 10 or not 0 <= commission_pct <= 1:
@@ -530,7 +679,6 @@ def forex_paper_status(user_id: str, portfolio_id: str) -> dict[str, Any]:
         trades = db.scalars(select(ForexPaperTrade).where(
             ForexPaperTrade.run_id == run.id
         ).order_by(ForexPaperTrade.created_at.desc()).limit(100)).all()
-        wins = sum(1 for t in closed if float(t.realized_pnl_usd) > 0)
         return {
             "status": run.status, "run_id": run.id, "symbols": run.symbols,
             "started_at": run.started_at.isoformat(), "ends_at": run.ends_at.isoformat(),

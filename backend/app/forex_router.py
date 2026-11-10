@@ -3,7 +3,10 @@ import os
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field
 from .v11_platform import current_user
-from .forex_paper import start_forex_paper_run, forex_paper_status, stop_forex_paper_run, forex_worker_state
+from .forex_paper import (
+    start_forex_paper_run, forex_paper_status, stop_forex_paper_run,
+    forex_worker_state, forex_paper_preflight,
+)
 
 router = APIRouter(prefix="/api/v1/forex", tags=["forex-intraday-paper"])
 
@@ -31,6 +34,11 @@ def forex_intraday_status():
         "execution_allowed": False,
         "warning": "Free-plan WebSocket is limited to trial symbols. Confirm all eight subscriptions in worker logs before starting a paper run.",
     }
+
+
+@router.get("/paper/preflight")
+def api_forex_paper_preflight(portfolio_id: str, user=Depends(current_user)):
+    return forex_paper_preflight(user["id"], portfolio_id)
 
 
 @router.post("/paper/start", status_code=201)

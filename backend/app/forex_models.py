@@ -115,5 +115,6 @@ class ForexWorkerState(Base):
     status: Mapped[str] = mapped_column(String(20), nullable=False, default="starting")
     subscribed_symbols: Mapped[list] = mapped_column(JSON, nullable=False, default=list)
     last_tick_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    last_tick_by_symbol: Mapped[dict] = mapped_column(JSON, nullable=False, default=dict)
     heartbeat_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
     last_error: Mapped[str | None] = mapped_column(String(240))
